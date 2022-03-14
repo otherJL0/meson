@@ -87,7 +87,7 @@ class GeneratorMD(GeneratorBase):
     def _gen_filename(self, file_id: str, *, extension: str = 'md') -> str:
         parts = file_id.split('.')
         assert parts[0] == 'root'
-        assert all([x for x in parts])
+        assert all(list(parts))
         parts[0] = _ROOT_BASENAME
         parts = [re.sub(r'[0-9]+_', '', x) for x in parts]
         return f'{"_".join(parts)}.{extension}'

@@ -215,7 +215,7 @@ def force_print(*args: str, nested: bool, **kwargs: T.Any) -> None:
 
     raw = iostr.getvalue()
     if log_depth:
-        prepend = log_depth[-1] + '| ' if nested else ''
+        prepend = f'{log_depth[-1]}| ' if nested else ''
         lines = []
         for l in raw.split('\n'):
             l = l.strip()
@@ -240,7 +240,7 @@ def _debug_log_cmd(cmd: str, args: T.List[str]) -> None:
     if not _in_ci:
         return
     args = [f'"{x}"' for x in args]  # Quote all args, just in case
-    debug('!meson_ci!/{} {}'.format(cmd, ' '.join(args)))
+    debug(f"!meson_ci!/{cmd} {' '.join(args)}")
 
 def cmd_ci_include(file: str) -> None:
     _debug_log_cmd('ci_include', [file])
@@ -301,16 +301,16 @@ def _log_error(severity: str, *rargs: TV_Loggable,
 
     # The typing requirements here are non-obvious. Lists are invariant,
     # therefore T.List[A] and T.List[T.Union[A, B]] are not able to be joined
-    if severity == 'notice':
+    if severity == 'deprecation':
+        label = [red('DEPRECATION:')]
+    elif severity == 'error':
+        label = [red('ERROR:')]
+    elif severity == 'notice':
         label = [bold('NOTICE:')]  # type: TV_LoggableList
     elif severity == 'warning':
         label = [yellow('WARNING:')]
-    elif severity == 'error':
-        label = [red('ERROR:')]
-    elif severity == 'deprecation':
-        label = [red('DEPRECATION:')]
     else:
-        raise MesonException('Invalid severity ' + severity)
+        raise MesonException(f'Invalid severity {severity}')
     # rargs is a tuple, not a list
     args = label + list(rargs)
 

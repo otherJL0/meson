@@ -57,12 +57,10 @@ class CMakeFileAPI:
         if not self.reply_dir.is_dir():
             raise CMakeException('No response from the CMake file API')
 
-        root = None
         reg_index = re.compile(r'^index-.*\.json$')
-        for i in self.reply_dir.iterdir():
-            if reg_index.match(i.name):
-                root = i
-                break
+        root = next(
+            (i for i in self.reply_dir.iterdir() if reg_index.match(i.name)), None
+        )
 
         if not root:
             raise CMakeException('Failed to find the CMake file API index')
@@ -148,9 +146,9 @@ class CMakeFileAPI:
                 elif i['role'] == 'libraries':
                     link_libs += [i['fragment']]
                 elif i['role'] == 'libraryPath':
-                    link_flags += ['-L{}'.format(i['fragment'])]
+                    link_flags += [f"-L{i['fragment']}"]
                 elif i['role'] == 'frameworkPath':
-                    link_flags += ['-F{}'.format(i['fragment'])]
+                    link_flags += [f"-F{i['fragment']}"]
             for i in tgt.get('archive', {}).get('commandFragments', []):
                 if i['role'] == 'flags':
                     link_flags += [i['fragment']]
@@ -177,10 +175,7 @@ class CMakeFileAPI:
             for cg in tgt.get('compileGroups', []):
                 # Again, why an array, when there is usually only one element
                 # and arguments are separated with spaces...
-                flags = []
-                for i in cg.get('compileCommandFragments', []):
-                    flags += [i['fragment']]
-
+                flags = [i['fragment'] for i in cg.get('compileCommandFragments', [])]
                 cg_data = {
                     'defines': [x.get('define', '') for x in cg.get('defines', [])],
                     'compileFlags': ' '.join(flags),
@@ -284,10 +279,12 @@ class CMakeFileAPI:
                 data[idx] = self._strip_data(i)
 
         elif isinstance(data, dict):
-            new = {}
-            for key, val in data.items():
-                if key not in STRIP_KEYS:
-                    new[key] = self._strip_data(val)
+            new = {
+                key: self._strip_data(val)
+                for key, val in data.items()
+                if key not in STRIP_KEYS
+            }
+
             data = new
 
         return data

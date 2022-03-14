@@ -205,10 +205,7 @@ class MesonApp:
         b = build.Build(env)
 
         intr = interpreter.Interpreter(b, user_defined_options=user_defined_options)
-        if env.is_cross_build():
-            logger_fun = mlog.log
-        else:
-            logger_fun = mlog.debug
+        logger_fun = mlog.log if env.is_cross_build() else mlog.debug
         build_machine = intr.builtin['build_machine']
         host_machine = intr.builtin['host_machine']
         target_machine = intr.builtin['target_machine']
@@ -281,7 +278,7 @@ class MesonApp:
         except Exception as e:
             mintro.write_meson_info_file(b, [e])
             if 'cdf' in locals():
-                old_cdf = cdf + '.prev'
+                old_cdf = f'{cdf}.prev'
                 if os.path.exists(old_cdf):
                     os.replace(old_cdf, cdf)
                 else:
@@ -291,8 +288,7 @@ class MesonApp:
     def _finalize_devenv(self, b: build.Build, intr: interpreter.Interpreter) -> None:
         b.devenv.append(intr.backend.get_devenv())
         for mod in intr.modules.values():
-            devenv = mod.get_devenv()
-            if devenv:
+            if devenv := mod.get_devenv():
                 b.devenv.append(devenv)
 
 def run(options: argparse.Namespace) -> int:

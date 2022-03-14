@@ -51,7 +51,13 @@ def parse_generator_expressions(
         if col_pos < 0:
             return '0'
         else:
-            return '1' if mesonlib.version_compare(arg[:col_pos], '{}{}'.format(op, arg[col_pos + 1:])) else '0'
+            return (
+                '1'
+                if mesonlib.version_compare(
+                    arg[:col_pos], f'{op}{arg[col_pos + 1:]}'
+                )
+                else '0'
+            )
 
     def target_property(arg: str) -> str:
         # We can't really support this since we don't have any context
@@ -76,15 +82,16 @@ def parse_generator_expressions(
             cfgs = [x for x in tgt.properties['IMPORTED_CONFIGURATIONS'] if x]
             cfg = cfgs[0]
 
-        if cmake_is_debug(trace.env):
-            if 'DEBUG' in cfgs:
-                cfg = 'DEBUG'
-            elif 'RELEASE' in cfgs:
-                cfg = 'RELEASE'
-        else:
-            if 'RELEASE' in cfgs:
-                cfg = 'RELEASE'
-
+        if cmake_is_debug(trace.env) and 'DEBUG' in cfgs:
+            cfg = 'DEBUG'
+        elif (
+            cmake_is_debug(trace.env)
+            and 'DEBUG' not in cfgs
+            and 'RELEASE' in cfgs
+            or not cmake_is_debug(trace.env)
+            and 'RELEASE' in cfgs
+        ):
+            cfg = 'RELEASE'
         if f'IMPORTED_IMPLIB_{cfg}' in tgt.properties:
             return ';'.join([x for x in tgt.properties[f'IMPORTED_IMPLIB_{cfg}'] if x])
         elif 'IMPORTED_IMPLIB' in tgt.properties:
@@ -144,9 +151,6 @@ def parse_generator_expressions(
         nonlocal i
         i += 2
 
-        func = ''  # type: str
-        args = ''  # type: str
-        res = ''   # type: str
         exp = ''   # type: str
 
         # Determine the body of the expression
@@ -165,6 +169,8 @@ def parse_generator_expressions(
 
         # Split the expression into a function and arguments part
         col_pos = exp.find(':')
+        func = ''
+        args = ''
         if col_pos < 0:
             func = exp
         else:
@@ -174,11 +180,7 @@ def parse_generator_expressions(
         func = func.strip()
         args = args.strip()
 
-        # Evaluate the function
-        if func in supported:
-            res = supported[func](args)
-
-        return res
+        return supported[func](args) if func in supported else ''
 
     while i < len(raw):
         if i < len(raw) - 1 and raw[i] == '$' and raw[i + 1] == '<':

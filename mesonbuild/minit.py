@@ -85,10 +85,12 @@ def autodetect_options(options: 'argparse.Namespace', sample: bool = False) -> N
         # The rest of the autodetection is not applicable to generating sample projects.
         return
     if not options.srcfiles:
-        srcfiles = []
-        for f in (f for f in Path().iterdir() if f.is_file()):
-            if f.suffix in LANG_SUFFIXES:
-                srcfiles.append(f)
+        srcfiles = [
+            f
+            for f in (f for f in Path().iterdir() if f.is_file())
+            if f.suffix in LANG_SUFFIXES
+        ]
+
         if not srcfiles:
             raise SystemExit('No recognizable source files found.\n'
                              'Run meson init in an empty directory to create a sample project.')
@@ -132,7 +134,7 @@ def autodetect_options(options: 'argparse.Namespace', sample: bool = False) -> N
                 break
         if not options.language:
             raise SystemExit("Can't autodetect language, please specify it with -l.")
-        print("Detected language: " + options.language)
+        print(f"Detected language: {options.language}")
 
 def add_arguments(parser: 'argparse.ArgumentParser') -> None:
     '''

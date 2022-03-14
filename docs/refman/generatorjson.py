@@ -43,16 +43,20 @@ class GeneratorJSON(GeneratorBase):
         return {
             'name': arg.name,
             'description': arg.description,
-            'since': arg.since if arg.since else None,
-            'deprecated': arg.deprecated if arg.deprecated else None,
+            'since': arg.since or None,
+            'deprecated': arg.deprecated or None,
             'type': self._generate_type(arg.type),
             'type_str': self._generate_type_str(arg.type),
-            'required': arg.required if isinstance(arg, Kwarg) else not isOptarg and not isinstance(arg, VarArgs),
+            'required': arg.required
+            if isinstance(arg, Kwarg)
+            else not isOptarg and not isinstance(arg, VarArgs),
             'default': arg.default if isinstance(arg, (PosArg, Kwarg)) else None,
-            'min_varargs': arg.min_varargs if isinstance(arg, VarArgs) and arg.min_varargs > 0 else None,
-            'max_varargs': arg.max_varargs if isinstance(arg, VarArgs) and arg.max_varargs > 0 else None,
-
-            # Not yet supported
+            'min_varargs': arg.min_varargs
+            if isinstance(arg, VarArgs) and arg.min_varargs > 0
+            else None,
+            'max_varargs': arg.max_varargs
+            if isinstance(arg, VarArgs) and arg.max_varargs > 0
+            else None,
             'notes': [],
             'warnings': [],
         }
@@ -61,16 +65,19 @@ class GeneratorJSON(GeneratorBase):
         return {
             'name': func.name,
             'description': func.description,
-            'since': func.since if func.since else None,
-            'deprecated': func.deprecated if func.deprecated else None,
+            'since': func.since or None,
+            'deprecated': func.deprecated or None,
             'notes': func.notes,
             'warnings': func.warnings,
-            'example': func.example if func.example else None,
+            'example': func.example or None,
             'returns': self._generate_type(func.returns),
             'returns_str': self._generate_type_str(func.returns),
             'posargs': {x.name: self._generate_arg(x) for x in func.posargs},
             'optargs': {x.name: self._generate_arg(x, True) for x in func.optargs},
-            'kwargs': {x.name: self._generate_arg(x) for x in self.sorted_and_filtered(list(func.kwargs.values()))},
+            'kwargs': {
+                x.name: self._generate_arg(x)
+                for x in self.sorted_and_filtered(list(func.kwargs.values()))
+            },
             'varargs': self._generate_arg(func.varargs) if func.varargs else None,
         }
 
@@ -78,18 +85,27 @@ class GeneratorJSON(GeneratorBase):
         return {
             'name': obj.name,
             'description': obj.description,
-            'since': obj.since if obj.since else None,
-            'deprecated': obj.deprecated if obj.deprecated else None,
+            'since': obj.since or None,
+            'deprecated': obj.deprecated or None,
             'notes': obj.notes,
             'warnings': obj.warnings,
-            'defined_by_module': obj.defined_by_module.name if obj.defined_by_module else None,
+            'defined_by_module': obj.defined_by_module.name
+            if obj.defined_by_module
+            else None,
             'object_type': obj.obj_type.name,
             'is_container': obj.is_container,
-            'example': obj.example if obj.example else None,
-            'extends': obj.extends if obj.extends else None,
-            'returned_by': [x.name for x in self.sorted_and_filtered(obj.returned_by)],
-            'extended_by': [x.name for x in self.sorted_and_filtered(obj.extended_by)],
-            'methods': {x.name: self._generate_function(x) for x in self.sorted_and_filtered(obj.methods)},
+            'example': obj.example or None,
+            'extends': obj.extends or None,
+            'returned_by': [
+                x.name for x in self.sorted_and_filtered(obj.returned_by)
+            ],
+            'extended_by': [
+                x.name for x in self.sorted_and_filtered(obj.extended_by)
+            ],
+            'methods': {
+                x.name: self._generate_function(x)
+                for x in self.sorted_and_filtered(obj.methods)
+            },
         }
 
     def generate(self) -> None:

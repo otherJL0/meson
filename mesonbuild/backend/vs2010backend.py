@@ -85,12 +85,14 @@ def split_o_flags_args(args):
         if 'b' in flags:
             o_flags.append(arg)
         else:
-            o_flags += ['/O' + f for f in flags]
+            o_flags += [f'/O{f}' for f in flags]
     return o_flags
 
 
 def generate_guid_from_path(path, path_type):
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'meson-vs-' + path_type + ':' + str(path))).upper()
+    return str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f'meson-vs-{path_type}:{str(path)}')
+    ).upper()
 
 
 class Vs2010Backend(backends.Backend):
@@ -176,36 +178,30 @@ class Vs2010Backend(backends.Backend):
 
     def generate(self):
         target_machine = self.interpreter.builtin['target_machine'].cpu_family_method(None, None)
-        if target_machine == '64' or target_machine == 'x86_64':
+        if target_machine in ['64', 'x86_64']:
             # amd64 or x86_64
             self.platform = 'x64'
         elif target_machine == 'x86':
             # x86
             self.platform = 'Win32'
-        elif target_machine == 'aarch64' or target_machine == 'arm64':
+        elif target_machine in ['aarch64', 'arm64']:
             target_cpu = self.interpreter.builtin['target_machine'].cpu_method(None, None)
-            if target_cpu == 'arm64ec':
-                self.platform = 'arm64ec'
-            else:
-                self.platform = 'arm64'
+            self.platform = 'arm64ec' if target_cpu == 'arm64ec' else 'arm64'
         elif 'arm' in target_machine.lower():
             self.platform = 'ARM'
         else:
             raise MesonException('Unsupported Visual Studio platform: ' + target_machine)
 
         build_machine = self.interpreter.builtin['build_machine'].cpu_family_method(None, None)
-        if build_machine == '64' or build_machine == 'x86_64':
+        if build_machine in ['64', 'x86_64']:
             # amd64 or x86_64
             self.build_platform = 'x64'
         elif build_machine == 'x86':
             # x86
             self.build_platform = 'Win32'
-        elif build_machine == 'aarch64' or build_machine == 'arm64':
+        elif build_machine in ['aarch64', 'arm64']:
             target_cpu = self.interpreter.builtin['build_machine'].cpu_method(None, None)
-            if target_cpu == 'arm64ec':
-                self.build_platform = 'arm64ec'
-            else:
-                self.build_platform = 'arm64'
+            self.build_platform = 'arm64ec' if target_cpu == 'arm64ec' else 'arm64'
         elif 'arm' in build_machine.lower():
             self.build_platform = 'ARM'
         else:
@@ -252,7 +248,12 @@ class Vs2010Backend(backends.Backend):
                 else:
                     target_arch = os.environ.get('Platform', 'x86')
                     host_arch = target_arch
-                arch = host_arch + '_' + target_arch if host_arch != target_arch else target_arch
+                arch = (
+                    f'{host_arch}_{target_arch}'
+                    if host_arch != target_arch
+                    else target_arch
+                )
+
                 return f'"{script_path}" {arch}'
 
         # Otherwise try the VS2017 Developer Command Prompt.
@@ -264,10 +265,12 @@ class Vs2010Backend(backends.Backend):
         return ''
 
     def get_obj_target_deps(self, obj_list):
-        result = {}
-        for o in obj_list:
-            if isinstance(o, build.ExtractedObjects):
-                result[o.target.get_id()] = o.target
+        result = {
+            o.target.get_id(): o.target
+            for o in obj_list
+            if isinstance(o, build.ExtractedObjects)
+        }
+
         return result.items()
 
     def get_target_deps(self, t, recursive=False):
@@ -294,10 +297,7 @@ class Vs2010Backend(backends.Backend):
                 for ldep in target.link_depends:
                     if isinstance(ldep, build.CustomTargetIndex):
                         all_deps[ldep.get_id()] = ldep.target
-                    elif isinstance(ldep, File):
-                        # Already built, no target references needed
-                        pass
-                    else:
+                    elif not isinstance(ldep, File):
                         all_deps[ldep.get_id()] = ldep
 
                 for obj_id, objdep in self.get_obj_target_deps(target.objects):
@@ -349,7 +349,7 @@ class Vs2010Backend(backends.Backend):
 
     def generate_solution(self, sln_filename, projlist):
         default_projlist = self.get_build_by_default_targets()
-        sln_filename_tmp = sln_filename + '~'
+        sln_filename_tmp = f'{sln_filename}~'
         # Note using the utf-8 BOM requires the blank line, otherwise Visual Studio Version Selector fails.
         # Without the BOM, VSVS fails if there is a blank line.
         with open(sln_filename_tmp, 'w', encoding='utf-8-sig') as ofile:
@@ -460,7 +460,7 @@ class Vs2010Backend(backends.Backend):
                 self.get_target_dir(target)
             )
             outdir.mkdir(exist_ok=True, parents=True)
-            fname = name + '.vcxproj'
+            fname = f'{name}.vcxproj'
             target_dir = PurePath(self.get_target_dir(target))
             relname = target_dir / fname
             projfile_path = outdir / fname
@@ -489,9 +489,7 @@ class Vs2010Backend(backends.Backend):
                 lang = self.lang_from_source_file(i)
                 if lang not in languages:
                     languages.append(lang)
-            elif self.environment.is_library(i):
-                pass
-            else:
+            elif not self.environment.is_library(i):
                 # Everything that is not an object or source file is considered a header.
                 headers.append(i)
         return sources, headers, objects, languages
@@ -523,7 +521,7 @@ class Vs2010Backend(backends.Backend):
                 # This dependency was already handled manually.
                 continue
             relpath = self.get_target_dir_relative_to(dep, target)
-            vcxproj = os.path.join(relpath, dep.get_id() + '.vcxproj')
+            vcxproj = os.path.join(relpath, f'{dep.get_id()}.vcxproj')
             tid = self.environment.coredata.target_guids[dep.get_id()]
             self.add_project_reference(root, vcxproj, tid)
 

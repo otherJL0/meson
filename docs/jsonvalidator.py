@@ -17,7 +17,7 @@ root: dict
 
 def assert_has_typed_keys(path: str, data: dict, keys: T.Dict[str, T.Any]) -> dict:
     assert set(data.keys()).issuperset(keys.keys()), f'{path}: DIFF: {set(data.keys()).difference(keys.keys())}'
-    res = dict()
+    res = {}
     for key, val in keys.items():
         cur = data.pop(key)
         assert isinstance(cur, val), f'{path}: type({key}: {cur}) != {val}'
@@ -164,7 +164,7 @@ def main() -> int:
         'returned': list,
         'modules': dict,
     }
-    assert_has_typed_keys(f'root.objects_by_type', refs, expected)
+    assert_has_typed_keys('root.objects_by_type', refs, expected)
     assert not refs, f'root.objects_by_type has extra keys: {refs.keys()}'
     assert all(isinstance(x, str) for x in root['objects_by_type']['elementary'])
     assert all(isinstance(x, str) for x in root['objects_by_type']['builtins'])

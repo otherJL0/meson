@@ -165,8 +165,7 @@ class LoaderYAML(LoaderBase):
         if self.strict:
             import strictyaml
             def loader(file: str, template: T.Any, label: str) -> T.Dict:
-                r: T.Dict = strictyaml.load(file, template, label=label).data
-                return r
+                return strictyaml.load(file, template, label=label).data
 
             self._load = loader
             template = StrictTemplate()

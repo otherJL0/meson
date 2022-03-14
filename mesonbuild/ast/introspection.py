@@ -212,9 +212,7 @@ class IntrospectionInterpreter(AstInterpreter):
                 curr = inqueue.pop(0)
                 arg_node = None
                 assert isinstance(curr, BaseNode)
-                if isinstance(curr, FunctionNode):
-                    arg_node = curr.args
-                elif isinstance(curr, ArrayNode):
+                if isinstance(curr, (FunctionNode, ArrayNode)):
                     arg_node = curr.args
                 elif isinstance(curr, IdNode):
                     # Try to resolve the ID and append the node to the queue
@@ -271,12 +269,14 @@ class IntrospectionInterpreter(AstInterpreter):
 
     def build_library(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> T.Optional[T.Dict[str, T.Any]]:
         default_library = self.coredata.get_option(OptionKey('default_library'))
-        if default_library == 'shared':
+        if (
+            default_library == 'shared'
+            or default_library != 'static'
+            and default_library == 'both'
+        ):
             return self.build_target(node, args, kwargs, SharedLibrary)
         elif default_library == 'static':
             return self.build_target(node, args, kwargs, StaticLibrary)
-        elif default_library == 'both':
-            return self.build_target(node, args, kwargs, SharedLibrary)
         return None
 
     def func_executable(self, node: BaseNode, args: T.List[TYPE_nvar], kwargs: T.Dict[str, TYPE_nvar]) -> T.Optional[T.Dict[str, T.Any]]:
