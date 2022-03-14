@@ -84,7 +84,10 @@ class CommandLineParser:
         # FIXME: Cannot have hidden subparser:
         # https://bugs.python.org/issue22848
         if help_msg == argparse.SUPPRESS:
-            p = argparse.ArgumentParser(prog='meson ' + name, formatter_class=self.formatter)
+            p = argparse.ArgumentParser(
+                prog=f'meson {name}', formatter_class=self.formatter
+            )
+
             self.hidden_commands.append(name)
         else:
             p = self.subparsers.add_parser(name, help=help_msg, aliases=aliases, formatter_class=self.formatter)
@@ -119,7 +122,6 @@ class CommandLineParser:
         return 0
 
     def run(self, args):
-        pending_python_deprecation_notice = False
         # If first arg is not a known command, assume user wants to run the setup
         # command.
         known_commands = list(self.commands.keys()) + ['-h', '--help']
@@ -141,11 +143,12 @@ class CommandLineParser:
         if command is None:
             command = options.command
 
-        # Bump the version here in order to add a pre-exit warning that we are phasing out
-        # support for old python. If this is already the oldest supported version, then
-        # this can never be true and does nothing.
-        if command in ('setup', 'compile', 'test', 'install') and sys.version_info < (3, 7):
-            pending_python_deprecation_notice = True
+        pending_python_deprecation_notice = command in (
+            'setup',
+            'compile',
+            'test',
+            'install',
+        ) and sys.version_info < (3, 7)
 
         try:
             return options.run_func(options)
@@ -192,7 +195,7 @@ def run_script_command(script_name, script_args):
     module_name = script_map.get(script_name, script_name)
 
     try:
-        module = importlib.import_module('mesonbuild.scripts.' + module_name)
+        module = importlib.import_module(f'mesonbuild.scripts.{module_name}')
     except ModuleNotFoundError as e:
         mlog.exception(e)
         return 1

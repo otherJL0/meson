@@ -199,11 +199,17 @@ def get_parsed_args_vs(options: 'argparse.Namespace', builddir: Path) -> T.Tuple
                 raise MesonException('Only one target may be specified when `run` target type is used on this backend.')
             intro_target = get_target_from_intro_data(ParsedTargetName(options.targets[0]), builddir, intro_data)
             proj_dir = Path(intro_target['filename'][0]).parent
-            proj = proj_dir/'{}.vcxproj'.format(intro_target['id'])
+            proj = proj_dir / f"{intro_target['id']}.vcxproj"
             cmd += [str(proj.resolve())]
         else:
             cmd += [str(sln.resolve())]
-            cmd.extend(['-target:{}'.format(generate_target_name_vs(ParsedTargetName(t), builddir, intro_data)) for t in options.targets])
+            cmd.extend(
+                [
+                    f'-target:{generate_target_name_vs(ParsedTargetName(t), builddir, intro_data)}'
+                    for t in options.targets
+                ]
+            )
+
     else:
         cmd += [str(sln.resolve())]
 
@@ -246,10 +252,7 @@ def get_parsed_args_xcode(options: 'argparse.Namespace', builddir: Path) -> T.Tu
             cmd += ['-target', t]
 
     if options.clean:
-        if options.targets:
-            cmd += ['clean']
-        else:
-            cmd += ['-alltargets', 'clean']
+        cmd += ['clean'] if options.targets else ['-alltargets', 'clean']
         # Otherwise xcodebuild tries to delete the builddir and fails
         cmd += ['-UseNewBuildSystem=FALSE']
 
@@ -258,11 +261,6 @@ def get_parsed_args_xcode(options: 'argparse.Namespace', builddir: Path) -> T.Tu
 
     if options.load_average > 0:
         mlog.warning('xcodebuild does not have a load-average switch, ignoring')
-
-    if options.verbose:
-        # xcodebuild is already quite verbose, and -quiet doesn't print any
-        # status messages
-        pass
 
     cmd += options.xcode_args
     return cmd, None

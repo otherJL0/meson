@@ -48,7 +48,7 @@ def decode_match(match: T.Match[str]) -> str:
 class ParseException(MesonException):
     def __init__(self, text: str, line: str, lineno: int, colno: int) -> None:
         # Format as error message, followed by the line with the error, followed by a caret to show the error column.
-        super().__init__("{}\n{}\n{}".format(text, line, '{}^'.format(' ' * colno)))
+        super().__init__("{}\n{}\n{}".format(text, line, f"{' ' * colno}^"))
         self.lineno = lineno
         self.colno = colno
 
@@ -72,7 +72,14 @@ class BlockParseException(MesonException):
             # Followed by a caret to show the block start
             # Followed by underscores
             # Followed by a caret to show the block end.
-            super().__init__("{}\n{}\n{}".format(text, line, '{}^{}^'.format(' ' * start_colno, '_' * (colno - start_colno - 1))))
+            super().__init__(
+                "{}\n{}\n{}".format(
+                    text,
+                    line,
+                    f"{' ' * start_colno}^{'_' * (colno - start_colno - 1)}^",
+                )
+            )
+
         else:
             # If block start and end are on different lines, it is formatted as:
             # Error message
@@ -81,7 +88,19 @@ class BlockParseException(MesonException):
             # Followed by a message saying where the block started.
             # Followed by the line of the block start.
             # Followed by a caret for the block start.
-            super().__init__("%s\n%s\n%s\nFor a block that started at %d,%d\n%s\n%s" % (text, line, '%s^' % (' ' * colno), start_lineno, start_colno, start_line, "%s^" % (' ' * start_colno)))
+            super().__init__(
+                "%s\n%s\n%s\nFor a block that started at %d,%d\n%s\n%s"
+                % (
+                    text,
+                    line,
+                    f"{' ' * colno}^",
+                    start_lineno,
+                    start_colno,
+                    start_line,
+                    f"{' ' * start_colno}^",
+                )
+            )
+
         self.lineno = lineno
         self.colno = colno
 
@@ -163,8 +182,7 @@ class Lexer:
             matched = False
             value = None  # type: T.Union[str, bool, int]
             for (tid, reg) in self.token_specification:
-                mo = reg.match(self.code, loc)
-                if mo:
+                if mo := reg.match(self.code, loc):
                     curline = lineno
                     curline_start = line_start
                     col = mo.start() - line_start
@@ -174,7 +192,7 @@ class Lexer:
                     span_end = loc
                     bytespan = (span_start, span_end)
                     match_text = mo.group()
-                    if tid == 'ignore' or tid == 'comment':
+                    if tid in ['ignore', 'comment']:
                         break
                     elif tid == 'lparen':
                         par_count += 1
@@ -254,7 +272,7 @@ class BaseNode:
         self.condition_level = 0  # type: int
 
     def accept(self, visitor: 'AstVisitor') -> None:
-        fname = 'visit_{}'.format(type(self).__name__)
+        fname = f'visit_{type(self).__name__}'
         if hasattr(visitor, fname):
             func = getattr(visitor, fname)
             if callable(func):
@@ -601,8 +619,7 @@ class Parser:
         }
         left = self.e5muldiv()
         while True:
-            op = self.accept_any(tuple(op_map.keys()))
-            if op:
+            if op := self.accept_any(tuple(op_map.keys())):
                 left = ArithmeticNode(op_map[op], left, self.e5muldiv())
             else:
                 break
@@ -616,8 +633,7 @@ class Parser:
         }
         left = self.e6()
         while True:
-            op = self.accept_any(tuple(op_map.keys()))
-            if op:
+            if op := self.accept_any(tuple(op_map.keys())):
                 left = ArithmeticNode(op_map[op], left, self.e6())
             else:
                 break
@@ -692,15 +708,14 @@ class Parser:
         a = ArgumentNode(self.current)
 
         while not isinstance(s, EmptyNode):
-            if self.accept('colon'):
-                a.set_kwarg_no_check(s, self.statement())
-                potential = self.current
-                if not self.accept('comma'):
-                    return a
-                a.commas.append(potential)
-            else:
+            if not self.accept('colon'):
                 raise ParseException('Only key:value pairs are valid in dict construction.',
                                      self.getline(), s.lineno, s.colno)
+            a.set_kwarg_no_check(s, self.statement())
+            potential = self.current
+            if not self.accept('comma'):
+                return a
+            a.commas.append(potential)
             s = self.statement()
         return a
 

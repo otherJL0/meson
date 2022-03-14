@@ -51,10 +51,10 @@ ALL_TYPES_STRING = ', '.join(ALL_TYPES)
 def read_archive_files(path: Path, base_path: Path) -> T.Set[Path]:
     if path.suffix == '.zip':
         with zipfile.ZipFile(path, 'r') as zip_archive:
-            archive_files = set(base_path / i.filename for i in zip_archive.infolist())
+            archive_files = {base_path / i.filename for i in zip_archive.infolist()}
     else:
         with tarfile.open(path) as tar_archive: # [ignore encoding]
-            archive_files = set(base_path / i.name for i in tar_archive)
+            archive_files = {base_path / i.name for i in tar_archive}
     return archive_files
 
 class Logger:
@@ -75,8 +75,8 @@ class Logger:
         max_len = shutil.get_terminal_size().columns - len(line)
         running = ', '.join(self.running_tasks)
         if len(running) + 3 > max_len:
-            running = running[:max_len - 6] + '...'
-        line = line + f' ({running})'
+            running = f'{running[:max_len - 6]}...'
+        line = f'{line} ({running})'
         print(self.should_erase_line, line, sep='', end='\r')
         self.should_erase_line = '\x1b[K'
 
@@ -323,27 +323,27 @@ class Runner:
                 self.log(mlog.red(str(e)))
                 return False
 
-        if branch == '':
-            # We are currently in detached mode
-            if options.reset:
-                success = self.git_checkout_and_reset(revision)
-            else:
-                success = self.git_checkout_and_rebase(revision)
-        elif branch == revision:
+        if (
+            branch == ''
+            and options.reset
+            or branch != ''
+            and branch != revision
+            and options.reset
+        ):
+            success = self.git_checkout_and_reset(revision)
+        elif branch == '':
+            success = self.git_checkout_and_rebase(revision)
+        elif branch != revision:
+            success = self.git_rebase(revision)
+        else:
             # We are in the same branch. A reset could still be needed in the case
             # a force push happened on remote repository.
-            if options.reset:
-                success = self.git_reset(revision)
-            else:
-                success = self.git_rebase(revision)
-        else:
-            # We are in another branch, either the user created their own branch and
-            # we should rebase it, or revision changed in the wrap file and we need
-            # to checkout the new branch.
-            if options.reset:
-                success = self.git_checkout_and_reset(revision)
-            else:
-                success = self.git_rebase(revision)
+            success = (
+                self.git_reset(revision)
+                if options.reset
+                else self.git_rebase(revision)
+            )
+
         if success:
             self.update_git_done()
         return success
@@ -362,10 +362,9 @@ class Runner:
             # because otherwise you can't develop without
             # a working net connection.
             subprocess.call(['hg', 'pull'], cwd=self.repo_dir)
-        else:
-            if subprocess.call(['hg', 'checkout', revno], cwd=self.repo_dir) != 0:
-                subprocess.check_call(['hg', 'pull'], cwd=self.repo_dir)
-                subprocess.check_call(['hg', 'checkout', revno], cwd=self.repo_dir)
+        elif subprocess.call(['hg', 'checkout', revno], cwd=self.repo_dir) != 0:
+            subprocess.check_call(['hg', 'pull'], cwd=self.repo_dir)
+            subprocess.check_call(['hg', 'checkout', revno], cwd=self.repo_dir)
         return True
 
     def update_svn(self) -> bool:
@@ -407,7 +406,7 @@ class Runner:
 
         if self.wrap.type != 'git' or not os.path.isdir(self.repo_dir):
             return True
-        branch_name = options.branch_name if options.branch_name else self.wrap.get('revision')
+        branch_name = options.branch_name or self.wrap.get('revision')
         if not branch_name:
             # It could be a detached git submodule for example.
             return True
@@ -440,7 +439,8 @@ class Runner:
         cmd = [options.command] + options.args
         p, out, _ = Popen_safe(cmd, stderr=subprocess.STDOUT, cwd=self.repo_dir)
         if p.returncode != 0:
-            err_message = "Command '{}' returned non-zero exit status {}.".format(" ".join(cmd), p.returncode)
+            err_message = f"""Command '{" ".join(cmd)}' returned non-zero exit status {p.returncode}."""
+
             self.log('  -> ', mlog.red(err_message))
             self.log(out, end='')
             return False
@@ -667,12 +667,14 @@ def run(options: 'Arguments') -> int:
         task_names.append(wrap.name)
     results = loop.run_until_complete(asyncio.gather(*tasks))
     logger.flush()
-    post_func = getattr(options, 'post_func', None)
-    if post_func:
+    if post_func := getattr(options, 'post_func', None):
         post_func(options)
     failures = [name for name, success in zip(task_names, results) if not success]
     if failures:
-        m = 'Please check logs above as command failed in some subprojects which could have been left in conflict state: '
-        m += ', '.join(failures)
+        m = (
+            'Please check logs above as command failed in some subprojects which could have been left in conflict state: '
+            + ', '.join(failures)
+        )
+
         mlog.warning(m)
     return len(failures)

@@ -36,7 +36,7 @@ class RefmanLinksExtension(Extension):
 
         # Add Arguments with `group.add_argument(...)`
         group.add_argument(
-            f'--refman-data-file',
+            '--refman-data-file',
             help="JSON file with the mappings to replace",
             default=None,
         )
@@ -75,10 +75,7 @@ class RefmanLinksExtension(Extension):
 
             # Fancy links for functions and methods
             text = obj_id
-            if text.startswith('@'):
-                text = text[1:]
-            else:
-                text = text + '()'
+            text = text[1:] if text.startswith('@') else f'{text}()'
             if not in_code_block:
                 text = f'<code>{text}</code>'
             link = f'<a href="{self._data[obj_id]}"><ins>{text}</ins></a>'

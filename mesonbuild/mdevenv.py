@@ -58,9 +58,12 @@ def bash_completion_files(b: build.Build, install_data: 'InstallData') -> T.List
         completionsdir = dep.get_variable(pkgconfig='completionsdir', pkgconfig_define=['datadir', datadir_abs])
         assert isinstance(completionsdir, str), 'for mypy'
         completionsdir_path = Path(completionsdir)
-        for f in install_data.data:
-            if completionsdir_path in Path(f.install_path).parents:
-                result.append(f.path)
+        result.extend(
+            f.path
+            for f in install_data.data
+            if completionsdir_path in Path(f.install_path).parents
+        )
+
     return result
 
 def add_gdb_auto_load(autoload_path: Path, gdb_helper: str, fname: Path) -> None:

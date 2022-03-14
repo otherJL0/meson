@@ -86,26 +86,26 @@ class RequiredKeys:
                     if default is not None:
                         cmd[key] = default
                     else:
-                        raise RewriterException('Key "{}" is missing in object for {}'
-                                                .format(key, f.__name__))
+                        raise RewriterException(f'Key "{key}" is missing in object for {f.__name__}')
                 if not isinstance(cmd[key], typ):
-                    raise RewriterException('Invalid type of "{}". Required is {} but provided was {}'
-                                            .format(key, typ.__name__, type(cmd[key]).__name__))
+                    raise RewriterException(
+                        f'Invalid type of "{key}". Required is {typ.__name__} but provided was {type(cmd[key]).__name__}'
+                    )
+
                 if choices is not None:
                     assert isinstance(choices, list)
                     if cmd[key] not in choices:
-                        raise RewriterException('Invalid value of "{}": Possible values are {} but provided was "{}"'
-                                                .format(key, choices, cmd[key]))
+                        raise RewriterException(
+                            f'Invalid value of "{key}": Possible values are {choices} but provided was "{cmd[key]}"'
+                        )
+
             return f(*wrapped_args, **wrapped_kwargs)
 
         return wrapped
 
 class MTypeBase:
     def __init__(self, node: T.Optional[BaseNode] = None):
-        if node is None:
-            self.node = self._new_node()  # lgtm [py/init-calls-subclass] (node creation does not depend on base class state)
-        else:
-            self.node = node
+        self.node = self._new_node() if node is None else node
         self.node_type = None
         for i in self.supported_nodes():  # lgtm [py/init-calls-subclass] (listing nodes does not depend on base class state)
             if isinstance(self.node, i):
@@ -206,9 +206,8 @@ class MTypeList(MTypeBase):
         return False
 
     def get_node(self):
-        if isinstance(self.node, ArrayNode):
-            if len(self.node.args.arguments) == 1:
-                return self.node.args.arguments[0]
+        if isinstance(self.node, ArrayNode) and len(self.node.args.arguments) == 1:
+            return self.node.args.arguments[0]
         return self.node
 
     def supported_element_nodes(self):
@@ -222,9 +221,7 @@ class MTypeList(MTypeBase):
         if not isinstance(value, list):
             value = [value]
         self._ensure_array_node()
-        self.node.args.arguments = [] # Remove all current nodes
-        for i in value:
-            self.node.args.arguments += [self._new_element_node(i)]
+        self.node.args.arguments = [self._new_element_node(i) for i in value]
 
     def add_value(self, value):
         if not isinstance(value, list):
@@ -235,10 +232,7 @@ class MTypeList(MTypeBase):
 
     def _remove_helper(self, value, equal_func):
         def check_remove_node(node):
-            for j in value:
-                if equal_func(i, j):
-                    return True
-            return False
+            return any(equal_func(i, j) for j in value)
 
         if not isinstance(value, list):
             value = [value]
@@ -263,9 +257,7 @@ class MTypeStrList(MTypeList):
         return StringNode(Token('', '', 0, 0, 0, None, str(value)))
 
     def _check_is_equal(self, node, value) -> bool:
-        if isinstance(node, StringNode):
-            return node.value == value
-        return False
+        return node.value == value if isinstance(node, StringNode) else False
 
     def _check_regex_matches(self, node, regex: str) -> bool:
         if isinstance(node, StringNode):
@@ -283,9 +275,7 @@ class MTypeIDList(MTypeList):
         return IdNode(Token('', '', 0, 0, 0, None, str(value)))
 
     def _check_is_equal(self, node, value) -> bool:
-        if isinstance(node, IdNode):
-            return node.value == value
-        return False
+        return node.value == value if isinstance(node, IdNode) else False
 
     def _check_regex_matches(self, node, regex: str) -> bool:
         if isinstance(node, StringNode):
@@ -393,11 +383,7 @@ class Rewriter:
 
     def find_target(self, target: str):
         def check_list(name: str) -> T.List[BaseNode]:
-            result = []
-            for i in self.interpreter.targets:
-                if name == i['name'] or name == i['id']:
-                    result += [i]
-            return result
+            return [i for i in self.interpreter.targets if name in [i['name'], i['id']]]
 
         targets = check_list(target)
         if targets:
@@ -423,10 +409,9 @@ class Rewriter:
 
     def find_dependency(self, dependency: str):
         def check_list(name: str):
-            for i in self.interpreter.dependencies:
-                if name == i['name']:
-                    return i
-            return None
+            return next(
+                (i for i in self.interpreter.dependencies if name == i['name']), None
+            )
 
         dep = check_list(dependency)
         if dep is not None:
@@ -510,13 +495,11 @@ class Rewriter:
             node = self.interpreter.project_node
             arg_node = node.args
         elif cmd['function'] == 'target':
-            tmp = self.find_target(cmd['id'])
-            if tmp:
+            if tmp := self.find_target(cmd['id']):
                 node = tmp['node']
                 arg_node = node.args
         elif cmd['function'] == 'dependency':
-            tmp = self.find_dependency(cmd['id'])
-            if tmp:
+            if tmp := self.find_dependency(cmd['id']):
                 node = tmp['node']
                 arg_node = node.args
         if not node:
@@ -542,7 +525,7 @@ class Rewriter:
                         data_list += [element]
                     info_data[key] = data_list
 
-            self.add_info('kwargs', '{}#{}'.format(cmd['function'], cmd['id']), info_data)
+            self.add_info('kwargs', f"{cmd['function']}#{cmd['id']}", info_data)
             return # Nothing else to do
 
         # Modify the kwargs
@@ -680,9 +663,8 @@ class Rewriter:
             def find_node(src):
                 for i in target['sources']:
                     for j in arg_list_from_node(i):
-                        if isinstance(j, StringNode):
-                            if j.value == src:
-                                return i, j
+                        if isinstance(j, StringNode) and j.value == src:
+                            return i, j
                 return None, None
 
             for i in cmd['sources']:
@@ -770,9 +752,8 @@ class Rewriter:
             def find_node(src):
                 for i in target['extra_files']:
                     for j in arg_list_from_node(i):
-                        if isinstance(j, StringNode):
-                            if j.value == src:
-                                return i, j
+                        if isinstance(j, StringNode) and j.value == src:
+                            return i, j
                 return None, None
 
             for i in cmd['sources']:
@@ -868,8 +849,10 @@ class Rewriter:
         if 'type' not in cmd:
             raise RewriterException('Command has no key "type"')
         if cmd['type'] not in self.functions:
-            raise RewriterException('Unknown command "{}". Supported commands are: {}'
-                                    .format(cmd['type'], list(self.functions.keys())))
+            raise RewriterException(
+                f"""Unknown command "{cmd['type']}". Supported commands are: {list(self.functions.keys())}"""
+            )
+
         self.functions[cmd['type']](cmd)
 
     def apply_changes(self):
@@ -1015,11 +998,10 @@ def generate_def_opts(options) -> T.List[dict]:
     }]
 
 def generate_cmd(options) -> T.List[dict]:
-    if os.path.exists(options.json):
-        with open(options.json, encoding='utf-8') as fp:
-            return json.load(fp)
-    else:
+    if not os.path.exists(options.json):
         return json.loads(options.json)
+    with open(options.json, encoding='utf-8') as fp:
+        return json.load(fp)
 
 # Map options.type to the actual type name
 cli_type_map = {

@@ -160,7 +160,7 @@ def join_lines(a: str, b: str) -> str:
 def dashes(s: str, dash: str, cols: int) -> str:
     if not s:
         return dash * cols
-    s = ' ' + s + ' '
+    s = f' {s} '
     width = uniwidth(s)
     first = (cols - width) // 2
     s = dash * first + s
@@ -197,7 +197,7 @@ if not is_windows():
     sh_quote = shlex.quote
 
 def env_tuple_to_str(env: T.Iterable[T.Tuple[str, str]]) -> str:
-    return ''.join(["{}={} ".format(k, sh_quote(v)) for k, v in env])
+    return ''.join([f"{k}={sh_quote(v)} " for k, v in env])
 
 
 class TestException(MesonException):
@@ -354,8 +354,7 @@ class TAPParser:
             # YAML blocks are only accepted after a test
             if self.state == self._AFTER_TEST:
                 if self.version >= 13:
-                    m = self._RE_YAML_START.match(line)
-                    if m:
+                    if m := self._RE_YAML_START.match(line):
                         self.state = self._YAML
                         self.yaml_lineno = self.lineno
                         self.yaml_indent = m.group(1)
@@ -375,8 +374,7 @@ class TAPParser:
             if line.startswith('#'):
                 return
 
-            m = self._RE_TEST.match(line)
-            if m:
+            if m := self._RE_TEST.match(line):
                 if self.plan and self.plan.late and not self.found_late_test:
                     yield self.Error('unexpected test after late plan')
                     self.found_late_test = True
@@ -389,8 +387,7 @@ class TAPParser:
                 self.state = self._AFTER_TEST
                 return
 
-            m = self._RE_PLAN.match(line)
-            if m:
+            if m := self._RE_PLAN.match(line):
                 if self.plan:
                     yield self.Error('more than one plan found')
                 else:
@@ -408,14 +405,12 @@ class TAPParser:
                     yield self.plan
                 return
 
-            m = self._RE_BAILOUT.match(line)
-            if m:
+            if m := self._RE_BAILOUT.match(line):
                 yield self.Bailout(m.group(1))
                 self.bailed_out = True
                 return
 
-            m = self._RE_VERSION.match(line)
-            if m:
+            if m := self._RE_VERSION.match(line):
                 # The TAP version is only accepted as the first line
                 if self.lineno != 1:
                     yield self.Error('version number must be on the first line')
@@ -536,10 +531,10 @@ class ConsoleLogger(TestLogger):
         if len(self.running_tests) == 1:
             count = f'{self.started_tests}/{self.test_count}'
         else:
-            count = '{}-{}/{}'.format(self.started_tests - len(self.running_tests) + 1,
-                                      self.started_tests, self.test_count)
+            count = f'{self.started_tests - len(self.running_tests) + 1}-{self.started_tests}/{self.test_count}'
 
-        left = '[{}] {} '.format(count, self.spinner[self.spinner_index])
+
+        left = f'[{count}] {self.spinner[self.spinner_index]} '
         self.spinner_index = (self.spinner_index + 1) % len(self.spinner)
 
         right = '{spaces} {dur:{durlen}}'.format(
@@ -551,9 +546,8 @@ class ConsoleLogger(TestLogger):
                 timeout=self.progress_test.timeout,
                 durlen=harness.duration_max_len)
         right += 's'
-        detail = self.progress_test.detail
-        if detail:
-            right += '   ' + detail
+        if detail := self.progress_test.detail:
+            right += f'   {detail}'
 
         line = harness.format(self.progress_test, colorize=True,
                               max_left_width=self.max_left_width,
@@ -639,8 +633,7 @@ class ConsoleLogger(TestLogger):
                 return
             print(result.res.get_command_marker() + cmdline)
 
-        log = self.shorten_log(harness, result)
-        if log:
+        if log := self.shorten_log(harness, result):
             print(self.output_start)
             print_safe(log)
             print(self.output_end)
@@ -699,10 +692,9 @@ class TextLogfileBuilder(TestFileLogger):
 
     def log(self, harness: 'TestHarness', result: 'TestRun') -> None:
         self.file.write(harness.format(result, False) + '\n')
-        cmdline = result.cmdline
-        if cmdline:
+        if cmdline := result.cmdline:
             starttime_str = time.strftime("%H:%M:%S", time.gmtime(result.starttime))
-            self.file.write(starttime_str + ' ' + cmdline + '\n')
+            self.file.write(f'{starttime_str} {cmdline}' + '\n')
             self.file.write(dashes('output', '-', 78) + '\n')
             self.file.write(result.get_log())
             self.file.write(dashes('', '-', 78) + '\n\n')
@@ -760,7 +752,7 @@ class JunitBuilder(TestLogger):
         if test.junit is not None:
             for suite in test.junit.findall('.//testsuite'):
                 # Assume that we don't need to merge anything here...
-                suite.attrib['name'] = '{}.{}.{}'.format(test.project, test.name, suite.attrib['name'])
+                suite.attrib['name'] = f"{test.project}.{test.name}.{suite.attrib['name']}"
 
                 # GTest can inject invalid attributes
                 for case in suite.findall('.//testcase[@result]'):
@@ -781,13 +773,29 @@ class JunitBuilder(TestLogger):
                 'testsuite',
                 name=suitename,
                 tests=str(len(test.results)),
-                errors=str(sum(1 for r in test.results if r.result in
-                               {TestResult.INTERRUPT, TestResult.ERROR})),
-                failures=str(sum(1 for r in test.results if r.result in
-                                 {TestResult.FAIL, TestResult.UNEXPECTEDPASS, TestResult.TIMEOUT})),
-                skipped=str(sum(1 for r in test.results if r.result is TestResult.SKIP)),
+                errors=str(
+                    sum(
+                        r.result in {TestResult.INTERRUPT, TestResult.ERROR}
+                        for r in test.results
+                    )
+                ),
+                failures=str(
+                    sum(
+                        r.result
+                        in {
+                            TestResult.FAIL,
+                            TestResult.UNEXPECTEDPASS,
+                            TestResult.TIMEOUT,
+                        }
+                        for r in test.results
+                    )
+                ),
+                skipped=str(
+                    sum(r.result is TestResult.SKIP for r in test.results)
+                ),
                 time=str(test.duration),
             )
+
 
             for subtest in test.results:
                 # Both name and classname are required. Use the suite name as
@@ -870,7 +878,7 @@ class TestRun:
         self._num = None       # type: T.Optional[int]
         self.name = name
         self.timeout = timeout
-        self.results = list()  # type: T.List[TAPParser.Test]
+        self.results = []
         self.returncode = 0
         self.starttime = None  # type: T.Optional[float]
         self.duration = None   # type: T.Optional[float]
@@ -1132,7 +1140,7 @@ async def read_decode_lines(reader: asyncio.StreamReader, q: 'asyncio.Queue[T.Op
         await q.put(None)
 
 def run_with_mono(fname: str) -> bool:
-    return fname.endswith('.exe') and not (is_windows() or is_cygwin())
+    return fname.endswith('.exe') and not is_windows() and not is_cygwin()
 
 def check_testdata(objs: T.List[TestSerialisation]) -> T.List[TestSerialisation]:
     if not isinstance(objs, list):
@@ -1315,8 +1323,10 @@ class SingleTestRunner:
                 if os.path.basename(c).startswith('wine'):
                     env['WINEPATH'] = get_wine_shortpath(
                         winecmd,
-                        ['Z:' + p for p in self.test.extra_paths] + env.get('WINEPATH', '').split(';')
+                        [f'Z:{p}' for p in self.test.extra_paths]
+                        + env.get('WINEPATH', '').split(';'),
                     )
+
                     break
 
         # If MALLOC_PERTURB_ is not set, or if it is set to an empty value,
@@ -1360,14 +1370,13 @@ class SingleTestRunner:
                 # Can not run test on cross compiled executable
                 # because there is no execute wrapper.
                 return None
-            elif self.test.cmd_is_exe:
-                # If the command is not built (ie, its a python script),
-                # then we don't check for the exe-wrapper
-                if not self.test.exe_wrapper.found():
-                    msg = ('The exe_wrapper defined in the cross file {!r} was not '
-                           'found. Please check the command and/or add it to PATH.')
-                    raise TestException(msg.format(self.test.exe_wrapper.name))
-                return self.test.exe_wrapper.get_command() + self.test.fname
+            # If the command is not built (ie, its a python script),
+            # then we don't check for the exe-wrapper
+            if not self.test.exe_wrapper.found():
+                msg = ('The exe_wrapper defined in the cross file {!r} was not '
+                       'found. Please check the command and/or add it to PATH.')
+                raise TestException(msg.format(self.test.exe_wrapper.name))
+            return self.test.exe_wrapper.get_command() + self.test.fname
         return self.test.fname
 
     def _get_cmd(self) -> T.Optional[T.List[str]]:
@@ -1550,7 +1559,7 @@ class TestHarness:
                 sys.exit(f"Unknown test setup '{self.options.setup}'.")
             return self.build_data.test_setups[self.options.setup]
         else:
-            full_name = test.project_name + ":" + self.options.setup
+            full_name = f'{test.project_name}:{self.options.setup}'
             if full_name not in self.build_data.test_setups:
                 sys.exit(f"Test setup '{self.options.setup}' not found from project '{test.project_name}'.")
             return self.build_data.test_setups[full_name]
@@ -1641,9 +1650,8 @@ class TestHarness:
                 res=result.res.get_text(colorize),
                 dur=result.duration,
                 durlen=self.duration_max_len + 3)
-            detail = result.detail
-            if detail:
-                right += '   ' + detail
+            if detail := result.detail:
+                right += f'   {detail}'
         return prefix + left + middle + right
 
     def summary(self) -> str:
@@ -1698,12 +1706,11 @@ class TestHarness:
 
     @staticmethod
     def split_suite_string(suite: str) -> T.Tuple[str, str]:
-        if ':' in suite:
-            split = suite.split(':', 1)
-            assert len(split) == 2
-            return split[0], split[1]
-        else:
+        if ':' not in suite:
             return suite, ""
+        split = suite.split(':', 1)
+        assert len(split) == 2
+        return split[0], split[1]
 
     @staticmethod
     def test_in_suites(test: TestSerialisation, suites: T.List[str]) -> bool:
@@ -1764,10 +1771,7 @@ class TestHarness:
         identical to "meson test foo1"
         '''
         for arg in self.options.args:
-            if ':' in arg:
-                subproj, name = arg.split(':', maxsplit=1)
-            else:
-                subproj, name = '', arg
+            subproj, name = arg.split(':', maxsplit=1) if ':' in arg else ('', arg)
             for t in tests:
                 if subproj and t.project_name != subproj:
                     continue
@@ -1798,9 +1802,13 @@ class TestHarness:
         if not self.logfile_base:
             return
 
-        self.loggers.append(JunitBuilder(self.logfile_base + '.junit.xml'))
-        self.loggers.append(JsonLogfileBuilder(self.logfile_base + '.json'))
-        self.loggers.append(TextLogfileBuilder(self.logfile_base + '.txt', errors='surrogateescape'))
+        self.loggers.append(JunitBuilder(f'{self.logfile_base}.junit.xml'))
+        self.loggers.append(JsonLogfileBuilder(f'{self.logfile_base}.json'))
+        self.loggers.append(
+            TextLogfileBuilder(
+                f'{self.logfile_base}.txt', errors='surrogateescape'
+            )
+        )
 
     @staticmethod
     def get_wrapper(options: argparse.Namespace) -> T.List[str]:
@@ -1816,14 +1824,13 @@ class TestHarness:
         return wrap
 
     def get_pretty_suite(self, test: TestSerialisation) -> str:
-        if len(self.suites) > 1 and test.suite:
-            rv = TestHarness.split_suite_string(test.suite[0])[0]
-            s = "+".join(TestHarness.split_suite_string(s)[1] for s in test.suite)
-            if s:
-                rv += ":"
-            return rv + s + " / " + test.name
-        else:
+        if len(self.suites) <= 1 or not test.suite:
             return test.name
+        rv = TestHarness.split_suite_string(test.suite[0])[0]
+        s = "+".join(TestHarness.split_suite_string(s)[1] for s in test.suite)
+        if s:
+            rv += ":"
+        return rv + s + " / " + test.name
 
     def run_tests(self, runners: T.List[SingleTestRunner]) -> None:
         try:
@@ -1870,7 +1877,7 @@ class TestHarness:
             futures.append(future)
             if warn:
                 self.flush_logfiles()
-                mlog.warning('CTRL-C detected, interrupting {}'.format(running_tests[future]))
+                mlog.warning(f'CTRL-C detected, interrupting {running_tests[future]}')
             del running_tests[future]
             future.cancel()
 
@@ -2012,9 +2019,7 @@ def run(options: argparse.Namespace) -> int:
 
     with TestHarness(options) as th:
         try:
-            if options.list:
-                return list_tests(th)
-            return th.doit()
+            return list_tests(th) if options.list else th.doit()
         except TestException as e:
             print('Meson test encountered an error:\n')
             if os.environ.get('MESON_FORCE_BACKTRACE'):

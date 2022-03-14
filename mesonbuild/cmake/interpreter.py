@@ -121,7 +121,7 @@ _cmake_name_regex = re.compile(r'[^_a-zA-Z0-9]')
 def _sanitize_cmake_name(name: str) -> str:
     name = _cmake_name_regex.sub('_', name)
     if name in FORBIDDEN_TARGET_NAMES or name.startswith('meson'):
-        name = 'cm_' + name
+        name = f'cm_{name}'
     return name
 
 class OutputTargetMap:
@@ -146,10 +146,7 @@ class OutputTargetMap:
         assign_keys(keys)
 
     def _return_first_valid_key(self, keys: T.List[str]) -> T.Optional[T.Union['ConverterTarget', 'ConverterCustomTarget']]:
-        for i in keys:
-            if i and i in self.tgt_map:
-                return self.tgt_map[i]
-        return None
+        return next((self.tgt_map[i] for i in keys if i and i in self.tgt_map), None)
 
     def target(self, name: str) -> T.Optional[T.Union['ConverterTarget', 'ConverterCustomTarget']]:
         return self._return_first_valid_key([self._target_key(name)])
@@ -166,7 +163,7 @@ class OutputTargetMap:
         keys = []
         candidates = [name, OutputTargetMap.rm_so_version.sub('', name)]
         for i in lib_suffixes:
-            if not name.endswith('.' + i):
+            if not name.endswith(f'.{i}'):
                 continue
             new_name = name[:-len(i) - 1]
             new_name = OutputTargetMap.rm_so_version.sub('', new_name)
@@ -209,23 +206,12 @@ class ConverterTarget:
     def __init__(self, target: CMakeTarget, env: 'Environment', for_machine: MachineChoice) -> None:
         self.env            = env
         self.for_machine    = for_machine
-        self.artifacts      = target.artifacts
-        self.src_dir        = target.src_dir
-        self.build_dir      = target.build_dir
-        self.name           = target.name
-        self.cmake_name     = target.name
-        self.full_name      = target.full_name
-        self.type           = target.type
-        self.install        = target.install
-        self.install_dir    = None  # type: T.Optional[Path]
         self.link_libraries = target.link_libraries
         self.link_flags     = target.link_flags + target.link_lang_flags
         self.depends_raw    = []  # type: T.List[str]
         self.depends        = []  # type: T.List[T.Union[ConverterTarget, ConverterCustomTarget]]
 
-        if target.install_paths:
-            self.install_dir = target.install_paths[0]
-
+        self.install_dir = target.install_paths[0] if target.install_paths else None
         self.languages           = set() # type: T.Set[str]
         self.sources             = []  # type: T.List[Path]
         self.generated           = []  # type: T.List[Path]
@@ -241,26 +227,26 @@ class ConverterTarget:
         # Project default override options (c_std, cpp_std, etc.)
         self.override_options = []  # type: T.List[str]
 
+        self.artifacts = target.artifacts
+        self.src_dir = target.src_dir
+        self.build_dir = target.build_dir
+        self.name = target.name
+        self.cmake_name = target.name
+        self.full_name = target.full_name
+        self.type = target.type
+        self.install = target.install
         # Convert the target name to a valid meson target name
         self.name = _sanitize_cmake_name(self.name)
 
         self.generated_raw = []  # type: T.List[Path]
 
         for i in target.files:
-            languages    = set()  #  type: T.Set[str]
-            src_suffixes = set()  #  type: T.Set[str]
-
-            # Insert suffixes
-            for j in i.sources:
-                if not j.suffix:
-                    continue
-                src_suffixes.add(j.suffix[1:])
+            src_suffixes = {j.suffix[1:] for j in i.sources if j.suffix}
 
             # Determine the meson language(s)
             # Extract the default language from the explicit CMake field
             lang_cmake_to_meson = {val.lower(): key for key, val in language_map.items()}
-            languages.add(lang_cmake_to_meson.get(i.language.lower(), 'c'))
-
+            languages = {lang_cmake_to_meson.get(i.language.lower(), 'c')}
             # Determine missing languages from the source suffixes
             for sfx in src_suffixes:
                 for key, val in lang_suffixes.items():
@@ -378,7 +364,11 @@ class ConverterTarget:
                 x = self.src_dir / x
             x = x.resolve()
             assert x.is_absolute()
-            if not x.exists() and not any([x.name.endswith(y) for y in obj_suffixes]) and not is_generated:
+            if (
+                not x.exists()
+                and not any(x.name.endswith(y) for y in obj_suffixes)
+                and not is_generated
+            ):
                 if path_is_in_root(x, Path(self.env.get_build_dir()), resolve=True):
                     x.mkdir(parents=True, exist_ok=True)
                     return x.relative_to(Path(self.env.get_build_dir()) / subdir)
@@ -468,7 +458,12 @@ class ConverterTarget:
 
     def process_object_libs(self, obj_target_list: T.List['ConverterTarget'], linker_workaround: bool) -> None:
         # Try to detect the object library(s) from the generated input sources
-        temp = [x for x in self.generated if any([x.name.endswith('.' + y) for y in obj_suffixes])]
+        temp = [
+            x
+            for x in self.generated
+            if any(x.name.endswith(f'.{y}') for y in obj_suffixes)
+        ]
+
         stem = [x.stem for x in temp]
         exts = self._all_source_suffixes()
         # Temp now stores the source filenames of the object files
@@ -481,10 +476,10 @@ class ConverterTarget:
                 # undo this step and guess the correct language suffix of the object file. This is done
                 # by trying all language suffixes meson knows and checking if one of them fits.
                 candidates = [j]  # type: T.List[str]
-                if not any([j.endswith('.' + x) for x in exts]):
+                if not any(j.endswith(f'.{x}') for x in exts):
                     mlog.warning('Object files do not contain source file extensions, thus falling back to guessing them.', once=True)
                     candidates += [f'{j}.{x}' for x in exts]
-                if any([x in source_files for x in candidates]):
+                if any(x in source_files for x in candidates):
                     if linker_workaround:
                         self._append_objlib_sources(i)
                     else:
@@ -494,7 +489,11 @@ class ConverterTarget:
                     break
 
         # Filter out object files from the sources
-        self.generated = [x for x in self.generated if not any([x.name.endswith('.' + y) for y in obj_suffixes])]
+        self.generated = [
+            x
+            for x in self.generated
+            if not any(x.name.endswith('.' + y) for y in obj_suffixes)
+        ]
 
     def _append_objlib_sources(self, tgt: 'ConverterTarget') -> None:
         self.includes       += tgt.includes
@@ -516,7 +515,7 @@ class ConverterTarget:
     def _all_source_suffixes(self) -> 'ImmutableListProtocol[str]':
         suffixes = []  # type: T.List[str]
         for exts in lang_suffixes.values():
-            suffixes += [x for x in exts]
+            suffixes += list(exts)
         return suffixes
 
     @lru_cache(maxsize=None)
@@ -585,7 +584,8 @@ class CustomTargetReference:
 
     def __repr__(self) -> str:
         if self.valid():
-            return '<{}: {} [{}]>'.format(self.__class__.__name__, self.ctgt.name, self.ctgt.outputs[self.index])
+            return f'<{self.__class__.__name__}: {self.ctgt.name} [{self.ctgt.outputs[self.index]}]>'
+
         else:
             return f'<{self.__class__.__name__}: INVALID REFERENCE>'
 
@@ -640,10 +640,7 @@ class ConverterCustomTarget:
         # Modify the original outputs if they are relative. Again,
         # relative paths are relative to ${CMAKE_CURRENT_BINARY_DIR}
         def ensure_absolute(x: Path) -> Path:
-            if x.is_absolute():
-                return x
-            else:
-                return self.current_bin_dir / x
+            return x if x.is_absolute() else self.current_bin_dir / x
         self.original_outputs = [ensure_absolute(x) for x in self.original_outputs]
 
         # Ensure that there is no duplicate output in the project so
@@ -833,7 +830,11 @@ class CMakeInterpreter:
             mlog.log(mlog.bold('  - toolchain file:          '), toolchain_file.as_posix())
             mlog.log(mlog.bold('  - preload file:            '), preload_file.as_posix())
             mlog.log(mlog.bold('  - trace args:              '), ' '.join(trace_args))
-            mlog.log(mlog.bold('  - disabled policy warnings:'), '[{}]'.format(', '.join(disable_policy_warnings)))
+            mlog.log(
+                mlog.bold('  - disabled policy warnings:'),
+                f"[{', '.join(disable_policy_warnings)}]",
+            )
+
             mlog.log()
             self.build_dir.mkdir(parents=True, exist_ok=True)
             os_env = environ.copy()
