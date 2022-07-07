@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from collections import OrderedDict
 from enum import Enum, unique
@@ -28,6 +29,7 @@ import typing as T
 
 from . import backends
 from .. import modules
+from ..modules import gnome
 from .. import environment, mesonlib
 from .. import build
 from .. import mlog
@@ -47,14 +49,14 @@ from ..mesonlib import (
 )
 from ..mesonlib import get_compiler_for_source, has_path_sep, OptionKey
 from .backends import CleanTrees
-from ..build import GeneratedList, InvalidArguments, ExtractedObjects
-from ..interpreter import Interpreter
+from ..build import GeneratedList, InvalidArguments
 
 if T.TYPE_CHECKING:
     from .._typing import ImmutableListProtocol
+    from ..build import ExtractedObjects
+    from ..interpreter import Interpreter
     from ..linkers import DynamicLinker, StaticLinker
     from ..compilers.cs import CsCompiler
-    from ..interpreter.interpreter import SourceOutputs
 
 
 FORTRAN_INCLUDE_PAT = r"^\s*#?include\s*['\"](\w+\.\w+)['\"]"
@@ -433,17 +435,22 @@ class NinjaBackend(backends.Backend):
         self.introspection_data = {}
         self.created_llvm_ir_rule = PerMachine(False, False)
 
-    def create_target_alias(self, to_target):
-        # We need to use aliases for targets that might be used as directory
-        # names to workaround a Ninja bug that breaks `ninja -t clean`.
-        # This is used for 'reserved' targets such as 'test', 'install',
-        # 'benchmark', etc, and also for RunTargets.
-        # https://github.com/mesonbuild/meson/issues/1644
-        if not to_target.startswith('meson-'):
-            raise AssertionError(f'Invalid usage of create_target_alias with {to_target!r}')
-        from_target = to_target[len('meson-'):]
-        elem = NinjaBuildElement(self.all_outputs, from_target, 'phony', to_target)
+    def create_phony_target(self, all_outputs, dummy_outfile, rulename, phony_infilename, implicit_outs=None):
+        '''
+        We need to use aliases for targets that might be used as directory
+        names to workaround a Ninja bug that breaks `ninja -t clean`.
+        This is used for 'reserved' targets such as 'test', 'install',
+        'benchmark', etc, and also for RunTargets.
+        https://github.com/mesonbuild/meson/issues/1644
+        '''
+        if dummy_outfile.startswith('meson-internal__'):
+            raise AssertionError(f'Invalid usage of create_phony_target with {dummy_outfile!r}')
+
+        to_name = f'meson-internal__{dummy_outfile}'
+        elem = NinjaBuildElement(all_outputs, dummy_outfile, 'phony', to_name)
         self.add_build(elem)
+
+        return NinjaBuildElement(all_outputs, to_name, rulename, phony_infilename, implicit_outs)
 
     def detect_vs_dep_prefix(self, tempfilename):
         '''VS writes its dependency in a locale dependent format.
@@ -606,7 +613,7 @@ class NinjaBackend(backends.Backend):
             with open(os.path.join(builddir, 'compile_commands.json'), 'wb') as f:
                 f.write(jsondb)
         except Exception:
-            mlog.warning('Could not create compilation database.')
+            mlog.warning('Could not create compilation database.', fatal=False)
 
     # Get all generated headers. Any source file might need them so
     # we need to add an order dependency to them.
@@ -785,7 +792,7 @@ class NinjaBackend(backends.Backend):
         # Generate rules for building the remaining source files in this target
         outname = self.get_target_filename(target)
         obj_list = []
-        is_unity = self.is_unity(target)
+        is_unity = target.is_unity
         header_deps = []
         unity_src = []
         unity_deps = [] # Generated sources that must be built before compiling a Unity target.
@@ -826,6 +833,11 @@ class NinjaBackend(backends.Backend):
                 # people generate files with weird suffixes (.inc, .fh) that they then include
                 # in their source files.
                 header_deps.append(raw_src)
+
+        # For D language, the object of generated source files are added
+        # as order only deps because other files may depend on them
+        d_generated_deps = []
+
         # These are the generated source files that need to be built for use by
         # this target. We create the Ninja build file elements for this here
         # because we need `header_deps` to be fully generated in the above loop.
@@ -838,6 +850,8 @@ class NinjaBackend(backends.Backend):
             compiled_sources.append(s)
             source2object[s] = o
             obj_list.append(o)
+            if s.split('.')[-1] in compilers.lang_suffixes['d']:
+                d_generated_deps.append(o)
 
         use_pch = self.environment.coredata.options.get(OptionKey('b_pch'))
         if use_pch and target.has_pch():
@@ -884,7 +898,7 @@ class NinjaBackend(backends.Backend):
                                            src.rel_to_builddir(self.build_to_src))
                     unity_src.append(abs_src)
                 else:
-                    o, s = self.generate_single_compile(target, src, False, [], header_deps)
+                    o, s = self.generate_single_compile(target, src, False, [], header_deps + d_generated_deps)
                     obj_list.append(o)
                     compiled_sources.append(s)
                     source2object[s] = o
@@ -892,7 +906,7 @@ class NinjaBackend(backends.Backend):
         obj_list += self.flatten_object_list(target)
         if is_unity:
             for src in self.generate_unity_files(target, unity_src):
-                o, s = self.generate_single_compile(target, src, True, unity_deps + header_deps)
+                o, s = self.generate_single_compile(target, src, True, unity_deps + header_deps + d_generated_deps)
                 obj_list.append(o)
                 compiled_sources.append(s)
                 source2object[s] = o
@@ -912,6 +926,8 @@ class NinjaBackend(backends.Backend):
             return True
         if 'cpp' not in target.compilers:
             return False
+        if '-fmodules-ts' in target.extra_args.get('cpp', []):
+            return True
         # Currently only the preview version of Visual Studio is supported.
         cpp = target.compilers['cpp']
         if cpp.get_id() != 'msvc':
@@ -1034,7 +1050,7 @@ class NinjaBackend(backends.Backend):
             subproject_prefix = ''
         return f'{subproject_prefix}{target.name}'
 
-    def generate_run_target(self, target):
+    def generate_run_target(self, target: build.RunTarget):
         target_name = self.build_run_target_name(target)
         if not target.command:
             # This is an alias target, it has no command, it just depends on
@@ -1044,16 +1060,13 @@ class NinjaBackend(backends.Backend):
             target_env = self.get_run_target_env(target)
             _, _, cmd = self.eval_custom_target_command(target)
             meson_exe_cmd, reason = self.as_meson_exe_cmdline(target.command[0], cmd[1:],
-                                                              force_serialize=True, env=target_env,
+                                                              env=target_env,
                                                               verbose=True)
-            cmd_type = f' (wrapped by meson {reason})'
-            internal_target_name = f'meson-{target_name}'
-            elem = NinjaBuildElement(self.all_outputs, internal_target_name, 'CUSTOM_COMMAND', [])
+            cmd_type = f' (wrapped by meson {reason})' if reason else ''
+            elem = self.create_phony_target(self.all_outputs, target_name, 'CUSTOM_COMMAND', [])
             elem.add_item('COMMAND', meson_exe_cmd)
             elem.add_item('description', f'Running external command {target.name}{cmd_type}')
             elem.add_item('pool', 'console')
-            # Alias that runs the target defined above with the name the user specified
-            self.create_target_alias(internal_target_name)
         deps = self.unwrap_dep_list(target)
         deps += self.get_custom_target_depend_files(target)
         elem.add_dep(deps)
@@ -1081,55 +1094,43 @@ class NinjaBackend(backends.Backend):
                       (['--use_llvm_cov'] if use_llvm_cov else []))
 
     def generate_coverage_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str]):
-        e = NinjaBuildElement(self.all_outputs, 'meson-coverage', 'CUSTOM_COMMAND', 'PHONY')
+        e = self.create_phony_target(self.all_outputs, 'coverage', 'CUSTOM_COMMAND', 'PHONY')
         self.generate_coverage_command(e, [])
         e.add_item('description', 'Generates coverage reports')
         self.add_build(e)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-coverage')
         self.generate_coverage_legacy_rules(gcovr_exe, gcovr_version)
 
     def generate_coverage_legacy_rules(self, gcovr_exe: T.Optional[str], gcovr_version: T.Optional[str]):
-        e = NinjaBuildElement(self.all_outputs, 'meson-coverage-html', 'CUSTOM_COMMAND', 'PHONY')
+        e = self.create_phony_target(self.all_outputs, 'coverage-html', 'CUSTOM_COMMAND', 'PHONY')
         self.generate_coverage_command(e, ['--html'])
         e.add_item('description', 'Generates HTML coverage report')
         self.add_build(e)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-coverage-html')
 
         if gcovr_exe:
-            e = NinjaBuildElement(self.all_outputs, 'meson-coverage-xml', 'CUSTOM_COMMAND', 'PHONY')
+            e = self.create_phony_target(self.all_outputs, 'coverage-xml', 'CUSTOM_COMMAND', 'PHONY')
             self.generate_coverage_command(e, ['--xml'])
             e.add_item('description', 'Generates XML coverage report')
             self.add_build(e)
-            # Alias that runs the target defined above
-            self.create_target_alias('meson-coverage-xml')
 
-            e = NinjaBuildElement(self.all_outputs, 'meson-coverage-text', 'CUSTOM_COMMAND', 'PHONY')
+            e = self.create_phony_target(self.all_outputs, 'coverage-text', 'CUSTOM_COMMAND', 'PHONY')
             self.generate_coverage_command(e, ['--text'])
             e.add_item('description', 'Generates text coverage report')
             self.add_build(e)
-            # Alias that runs the target defined above
-            self.create_target_alias('meson-coverage-text')
 
             if mesonlib.version_compare(gcovr_version, '>=4.2'):
-                e = NinjaBuildElement(self.all_outputs, 'meson-coverage-sonarqube', 'CUSTOM_COMMAND', 'PHONY')
+                e = self.create_phony_target(self.all_outputs, 'coverage-sonarqube', 'CUSTOM_COMMAND', 'PHONY')
                 self.generate_coverage_command(e, ['--sonarqube'])
                 e.add_item('description', 'Generates Sonarqube XML coverage report')
                 self.add_build(e)
-                # Alias that runs the target defined above
-                self.create_target_alias('meson-coverage-sonarqube')
 
     def generate_install(self):
         self.create_install_data_files()
-        elem = NinjaBuildElement(self.all_outputs, 'meson-install', 'CUSTOM_COMMAND', 'PHONY')
+        elem = self.create_phony_target(self.all_outputs, 'install', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_dep('all')
         elem.add_item('DESC', 'Installing files.')
         elem.add_item('COMMAND', self.environment.get_build_command() + ['install', '--no-rebuild'])
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-install')
 
     def generate_tests(self):
         self.serialize_tests()
@@ -1138,25 +1139,21 @@ class NinjaBackend(backends.Backend):
             cmd += ['--no-stdsplit']
         if self.environment.coredata.get_option(OptionKey('errorlogs')):
             cmd += ['--print-errorlogs']
-        elem = NinjaBuildElement(self.all_outputs, 'meson-test', 'CUSTOM_COMMAND', ['all', 'PHONY'])
+        elem = self.create_phony_target(self.all_outputs, 'test', 'CUSTOM_COMMAND', ['all', 'PHONY'])
         elem.add_item('COMMAND', cmd)
         elem.add_item('DESC', 'Running all tests.')
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        # Alias that runs the above-defined meson-test target
-        self.create_target_alias('meson-test')
 
         # And then benchmarks.
         cmd = self.environment.get_build_command(True) + [
             'test', '--benchmark', '--logbase',
             'benchmarklog', '--num-processes=1', '--no-rebuild']
-        elem = NinjaBuildElement(self.all_outputs, 'meson-benchmark', 'CUSTOM_COMMAND', ['all', 'PHONY'])
+        elem = self.create_phony_target(self.all_outputs, 'benchmark', 'CUSTOM_COMMAND', ['all', 'PHONY'])
         elem.add_item('COMMAND', cmd)
         elem.add_item('DESC', 'Running benchmark suite.')
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        # Alias that runs the above-defined meson-benchmark target
-        self.create_target_alias('meson-benchmark')
 
     def generate_rules(self):
         self.rules = []
@@ -1231,10 +1228,11 @@ class NinjaBackend(backends.Backend):
         elem = NinjaBuildElement(self.all_outputs, 'PHONY', 'phony', '')
         self.add_build(elem)
 
-    def generate_jar_target(self, target):
+    def generate_jar_target(self, target: build.Jar):
         fname = target.get_filename()
         outname_rel = os.path.join(self.get_target_dir(target), fname)
         src_list = target.get_sources()
+        resources = target.get_java_resources()
         class_list = []
         compiler = target.compilers['java']
         c = 'c'
@@ -1280,6 +1278,9 @@ class NinjaBackend(backends.Backend):
         commands += ['-C', self.get_target_private_dir(target), '.']
         elem = NinjaBuildElement(self.all_outputs, outname_rel, jar_rule, [])
         elem.add_dep(class_dep_list)
+        if resources:
+            # Copy all resources into the root of the jar.
+            elem.add_orderdep(self.__generate_sources_structure(Path(self.get_target_private_dir(target)), resources)[0])
         elem.add_item('ARGS', commands)
         self.add_build(elem)
         # Create introspection information
@@ -1307,7 +1308,7 @@ class NinjaBackend(backends.Backend):
         return args, deps
 
     def generate_cs_target(self, target: build.BuildTarget):
-        buildtype = self.get_option_for_target(OptionKey('buildtype'), target)
+        buildtype = target.get_option(OptionKey('buildtype'))
         fname = target.get_filename()
         outname_rel = os.path.join(self.get_target_dir(target), fname)
         src_list = target.get_sources()
@@ -1316,8 +1317,8 @@ class NinjaBackend(backends.Backend):
         deps = []
         commands = compiler.compiler_args(target.extra_args.get('cs', []))
         commands += compiler.get_buildtype_args(buildtype)
-        commands += compiler.get_optimization_args(self.get_option_for_target(OptionKey('optimization'), target))
-        commands += compiler.get_debug_args(self.get_option_for_target(OptionKey('debug'), target))
+        commands += compiler.get_optimization_args(target.get_option(OptionKey('optimization')))
+        commands += compiler.get_debug_args(target.get_option(OptionKey('debug')))
         if isinstance(target, build.Executable):
             commands.append('-target:exe')
         elif isinstance(target, build.SharedLibrary):
@@ -1358,7 +1359,7 @@ class NinjaBackend(backends.Backend):
 
     def determine_single_java_compile_args(self, target, compiler):
         args = []
-        args += compiler.get_buildtype_args(self.get_option_for_target(OptionKey('buildtype'), target))
+        args += compiler.get_buildtype_args(target.get_option(OptionKey('buildtype')))
         args += self.build.get_global_args(compiler, target.for_machine)
         args += self.build.get_project_args(compiler, target.subproject, target.for_machine)
         args += target.get_java_args()
@@ -1533,7 +1534,7 @@ class NinjaBackend(backends.Backend):
             # Outputted header
             hname = os.path.join(self.get_target_dir(target), target.vala_header)
             args += ['--header', hname]
-            if self.is_unity(target):
+            if target.is_unity:
                 # Without this the declarations will get duplicated in the .c
                 # files and cause a build failure when all of them are
                 # #include-d in one .c file.
@@ -1565,7 +1566,7 @@ class NinjaBackend(backends.Backend):
                     target.install_dir[3] = os.path.join(self.environment.get_datadir(), 'gir-1.0')
         # Detect gresources and add --gresources arguments for each
         for gensrc in other_src[1].values():
-            if isinstance(gensrc, modules.GResourceTarget):
+            if isinstance(gensrc, gnome.GResourceTarget):
                 gres_xml, = self.get_custom_target_sources(gensrc)
                 args += ['--gresources=' + gres_xml]
         extra_args = []
@@ -1601,18 +1602,17 @@ class NinjaBackend(backends.Backend):
 
         cython = target.compilers['cython']
 
-        opt_proxy = self.get_compiler_options_for_target(target)
-
         args: T.List[str] = []
         args += cython.get_always_args()
-        args += cython.get_buildtype_args(self.get_option_for_target(OptionKey('buildtype'), target))
-        args += cython.get_debug_args(self.get_option_for_target(OptionKey('debug'), target))
-        args += cython.get_optimization_args(self.get_option_for_target(OptionKey('optimization'), target))
-        args += cython.get_option_compile_args(opt_proxy)
+        args += cython.get_buildtype_args(target.get_option(OptionKey('buildtype')))
+        args += cython.get_debug_args(target.get_option(OptionKey('debug')))
+        args += cython.get_optimization_args(target.get_option(OptionKey('optimization')))
+        args += cython.get_option_compile_args(target.get_options())
         args += self.build.get_global_args(cython, target.for_machine)
         args += self.build.get_project_args(cython, target.subproject, target.for_machine)
+        args += target.get_extra_args('cython')
 
-        ext = opt_proxy[OptionKey('language', machine=target.for_machine, lang='cython')].value
+        ext = target.get_option(OptionKey('language', machine=target.for_machine, lang='cython'))
 
         for src in target.get_sources():
             if src.endswith('.pyx'):
@@ -1663,15 +1663,12 @@ class NinjaBackend(backends.Backend):
         elem.add_orderdep(instr)
         self.add_build(elem)
 
-    def __generate_compile_structure(self, target: build.BuildTarget) -> T.Tuple[T.List[str], T.Optional[str]]:
+    def __generate_sources_structure(self, root: Path, structured_sources: build.StructuredSources) -> T.Tuple[T.List[str], T.Optional[str]]:
         first_file: T.Optional[str] = None
         orderdeps: T.List[str] = []
-        root = Path(self.get_target_private_dir(target)) / 'structured'
-        for path, files in target.structured_sources.sources.items():
+        for path, files in structured_sources.sources.items():
             for file in files:
-                if isinstance(file, (str, File)):
-                    if isinstance(file, str):
-                        file = File.from_absolute_file(file)
+                if isinstance(file, File):
                     out = root / path / Path(file.fname).name
                     orderdeps.append(str(out))
                     self._generate_copy_target(file, out)
@@ -1691,13 +1688,13 @@ class NinjaBackend(backends.Backend):
         # Rust compiler takes only the main file as input and
         # figures out what other files are needed via import
         # statements and magic.
-        base_proxy = self.get_base_options_for_target(target)
+        base_proxy = target.get_options()
         args = rustc.compiler_args()
         # Compiler args for compiling this target
         args += compilers.get_base_compile_args(base_proxy, rustc)
         self.generate_generator_list_rules(target)
 
-        # dependencies need to cause a relink, they're not just for odering
+        # dependencies need to cause a relink, they're not just for ordering
         deps = [
             os.path.join(t.subdir, t.get_filename())
             for t in itertools.chain(target.link_targets, target.link_whole_targets)
@@ -1707,23 +1704,29 @@ class NinjaBackend(backends.Backend):
 
         main_rust_file = None
         if target.structured_sources:
-            if target.structured_sources.needs_copy(target):
-                _ods, main_rust_file = self.__generate_compile_structure(target)
+            if target.structured_sources.needs_copy():
+                _ods, main_rust_file = self.__generate_sources_structure(Path(
+                    self.get_target_private_dir(target)) / 'structured', target.structured_sources)
                 orderdeps.extend(_ods)
             else:
+                # The only way to get here is to have only files in the "root"
+                # positional argument, which are all generated into the same
+                # directory
                 g = target.structured_sources.first_file()
-                if isinstance(g, str):
-                    g = File.from_source_file(self.environment.source_dir, target.subdir, g)
 
                 if isinstance(g, File):
                     main_rust_file = g.rel_to_builddir(self.build_to_src)
                 elif isinstance(g, GeneratedList):
-                    main_rust_file = os.path.join(self.get_target_private_dir(target), i)
+                    main_rust_file = os.path.join(self.get_target_private_dir(target), g.get_outputs()[0])
                 else:
-                    main_rust_file = os.path.join(g.get_subdir(), i)
-                orderdeps.extend([os.path.join(self.build_to_src, target.subdir, s)
-                                  for s in  target.structured_sources.as_list()])
+                    main_rust_file = os.path.join(g.get_subdir(), g.get_outputs()[0])
 
+                for f in target.structured_sources.as_list():
+                    if isinstance(f, File):
+                        orderdeps.append(f.rel_to_builddir(self.build_to_src))
+                    else:
+                        orderdeps.extend([os.path.join(self.build_to_src, f.subdir, s)
+                                          for s in f.get_outputs()])
 
         for i in target.get_sources():
             if not rustc.can_compile(i):
@@ -1927,8 +1930,8 @@ class NinjaBackend(backends.Backend):
                 raise InvalidArguments(f'Swift target {target.get_basename()} contains a non-swift source file.')
         os.makedirs(self.get_target_private_dir_abs(target), exist_ok=True)
         compile_args = swiftc.get_compile_only_args()
-        compile_args += swiftc.get_optimization_args(self.get_option_for_target(OptionKey('optimization'), target))
-        compile_args += swiftc.get_debug_args(self.get_option_for_target(OptionKey('debug'), target))
+        compile_args += swiftc.get_optimization_args(target.get_option(OptionKey('optimization')))
+        compile_args += swiftc.get_debug_args(target.get_option(OptionKey('debug')))
         compile_args += swiftc.get_module_args(module_name)
         compile_args += self.build.get_project_args(swiftc, target.subproject, target.for_machine)
         compile_args += self.build.get_global_args(swiftc, target.for_machine)
@@ -2262,7 +2265,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         args = [x.replace('\\', '/') for x in args]
         return args
 
-    def generate_genlist_for_target(self, genlist, target):
+    def generate_genlist_for_target(self, genlist: build.GeneratedList, target: build.BuildTarget) -> None:
         generator = genlist.get_generator()
         subdir = genlist.subdir
         exe = generator.get_exe()
@@ -2358,7 +2361,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                         if modname in module_files:
                             raise InvalidArguments(
                                 f'Namespace collision: module {modname} defined in '
-                                'two files {module_files[modname]} and {s}.')
+                                f'two files {module_files[modname]} and {s}.')
                         module_files[modname] = s
                     else:
                         submodmatch = submodre.match(line)
@@ -2369,8 +2372,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
                             if submodname in submodule_files:
                                 raise InvalidArguments(
-                                    'Namespace collision: submodule {submodname} defined in '
-                                    'two files {submodule_files[submodname]} and {s}.')
+                                    f'Namespace collision: submodule {submodname} defined in '
+                                    f'two files {submodule_files[submodname]} and {s}.')
                             submodule_files[submodname] = s
 
         self.fortran_deps[target.get_basename()] = {**module_files, **submodule_files}
@@ -2456,7 +2459,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return linker.get_link_debugfile_args(outname)
 
     def generate_llvm_ir_compile(self, target, src):
-        base_proxy = self.get_base_options_for_target(target)
+        base_proxy = target.get_options()
         compiler = get_compiler_for_source(target.compilers.values(), src)
         commands = compiler.compiler_args()
         # Compiler args for compiling this target
@@ -2516,7 +2519,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return commands
 
     def _generate_single_compile_base_args(self, target: build.BuildTarget, compiler: 'Compiler') -> 'CompilerArgs':
-        base_proxy = self.get_base_options_for_target(target)
+        base_proxy = target.get_options()
         # Create an empty commands list, and start adding arguments from
         # various sources in the order in which they must override each other
         commands = compiler.compiler_args()
@@ -3018,9 +3021,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # options passed on the command-line, in default_options, etc.
         # These have the lowest priority.
         if isinstance(target, build.StaticLibrary):
-            commands += linker.get_base_link_args(self.get_base_options_for_target(target))
+            commands += linker.get_base_link_args(target.get_options())
         else:
-            commands += compilers.get_base_link_args(self.get_base_options_for_target(target),
+            commands += compilers.get_base_link_args(target.get_options(),
                                                      linker,
                                                      isinstance(target, build.SharedModule))
         # Add -nostdlib if needed; can't be overridden
@@ -3028,9 +3031,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # Add things like /NOLOGO; usually can't be overridden
         commands += linker.get_linker_always_args()
         # Add buildtype linker args: optimization level, etc.
-        commands += linker.get_buildtype_linker_args(self.get_option_for_target(OptionKey('buildtype'), target))
+        commands += linker.get_buildtype_linker_args(target.get_option(OptionKey('buildtype')))
         # Add /DEBUG and the pdb filename when using MSVC
-        if self.get_option_for_target(OptionKey('debug'), target):
+        if target.get_option(OptionKey('debug')):
             commands += self.get_link_debugfile_args(linker, target, outname)
             debugfile = self.get_link_debugfile_name(linker, target, outname)
             if debugfile is not None:
@@ -3161,33 +3164,27 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 mlog.debug("Library versioning disabled because we do not have symlink creation privileges.")
 
     def generate_custom_target_clean(self, trees: T.List[str]) -> str:
-        e = NinjaBuildElement(self.all_outputs, 'meson-clean-ctlist', 'CUSTOM_COMMAND', 'PHONY')
+        e = self.create_phony_target(self.all_outputs, 'clean-ctlist', 'CUSTOM_COMMAND', 'PHONY')
         d = CleanTrees(self.environment.get_build_dir(), trees)
         d_file = os.path.join(self.environment.get_scratch_dir(), 'cleantrees.dat')
         e.add_item('COMMAND', self.environment.get_build_command() + ['--internal', 'cleantrees', d_file])
         e.add_item('description', 'Cleaning custom target directories')
         self.add_build(e)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-clean-ctlist')
         # Write out the data file passed to the script
         with open(d_file, 'wb') as ofile:
             pickle.dump(d, ofile)
         return 'clean-ctlist'
 
     def generate_gcov_clean(self):
-        gcno_elem = NinjaBuildElement(self.all_outputs, 'meson-clean-gcno', 'CUSTOM_COMMAND', 'PHONY')
+        gcno_elem = self.create_phony_target(self.all_outputs, 'clean-gcno', 'CUSTOM_COMMAND', 'PHONY')
         gcno_elem.add_item('COMMAND', mesonlib.get_meson_command() + ['--internal', 'delwithsuffix', '.', 'gcno'])
         gcno_elem.add_item('description', 'Deleting gcno files')
         self.add_build(gcno_elem)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-clean-gcno')
 
-        gcda_elem = NinjaBuildElement(self.all_outputs, 'meson-clean-gcda', 'CUSTOM_COMMAND', 'PHONY')
+        gcda_elem = self.create_phony_target(self.all_outputs, 'clean-gcda', 'CUSTOM_COMMAND', 'PHONY')
         gcda_elem.add_item('COMMAND', mesonlib.get_meson_command() + ['--internal', 'delwithsuffix', '.', 'gcda'])
         gcda_elem.add_item('description', 'Deleting gcda files')
         self.add_build(gcda_elem)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-clean-gcda')
 
     def get_user_option_args(self):
         cmds = []
@@ -3200,13 +3197,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return sorted(cmds)
 
     def generate_dist(self):
-        elem = NinjaBuildElement(self.all_outputs, 'meson-dist', 'CUSTOM_COMMAND', 'PHONY')
+        elem = self.create_phony_target(self.all_outputs, 'dist', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('DESC', 'Creating source packages')
         elem.add_item('COMMAND', self.environment.get_build_command() + ['dist'])
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-dist')
 
     def generate_scanbuild(self):
         if not environment.detect_scanbuild():
@@ -3216,12 +3211,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         cmd = self.environment.get_build_command() + \
             ['--internal', 'scanbuild', self.environment.source_dir, self.environment.build_dir] + \
             self.environment.get_build_command() + self.get_user_option_args()
-        elem = NinjaBuildElement(self.all_outputs, 'meson-scan-build', 'CUSTOM_COMMAND', 'PHONY')
+        elem = self.create_phony_target(self.all_outputs, 'scan-build', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', cmd)
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-scan-build')
 
     def generate_clangtool(self, name, extra_arg=None):
         target_name = 'clang-' + name
@@ -3239,11 +3232,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         cmd = self.environment.get_build_command() + \
             ['--internal', 'clang' + name, self.environment.source_dir, self.environment.build_dir] + \
             extra_args
-        elem = NinjaBuildElement(self.all_outputs, 'meson-' + target_name, 'CUSTOM_COMMAND', 'PHONY')
+        elem = self.create_phony_target(self.all_outputs, target_name, 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', cmd)
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        self.create_target_alias('meson-' + target_name)
 
     def generate_clangformat(self):
         if not environment.detect_clangformat():
@@ -3267,12 +3259,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         cmd = self.environment.get_build_command() + \
             ['--internal', 'tags', tool, self.environment.source_dir]
-        elem = NinjaBuildElement(self.all_outputs, 'meson-' + target_name, 'CUSTOM_COMMAND', 'PHONY')
+        elem = self.create_phony_target(self.all_outputs, target_name, 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', cmd)
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-' + target_name)
 
     # For things like scan-build and other helper tools we might have.
     def generate_utils(self):
@@ -3283,28 +3273,32 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.generate_tags('ctags', 'ctags')
         self.generate_tags('cscope', 'cscope')
         cmd = self.environment.get_build_command() + ['--internal', 'uninstall']
-        elem = NinjaBuildElement(self.all_outputs, 'meson-uninstall', 'CUSTOM_COMMAND', 'PHONY')
+        elem = self.create_phony_target(self.all_outputs, 'uninstall', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', cmd)
         elem.add_item('pool', 'console')
         self.add_build(elem)
-        # Alias that runs the target defined above
-        self.create_target_alias('meson-uninstall')
 
     def generate_ending(self):
-        targetlist = []
-        for t in self.get_build_by_default_targets().values():
-            # Add the first output of each target to the 'all' target so that
-            # they are all built
-            targetlist.append(os.path.join(self.get_target_dir(t), t.get_outputs()[0]))
+        for targ, deps in [
+                ('all', self.get_build_by_default_targets()),
+                ('meson-test-prereq', self.get_testlike_targets()),
+                ('meson-benchmark-prereq', self.get_testlike_targets(True))]:
+            targetlist = []
+            # These must also be built by default.
+            # XXX: Sometime in the future these should be built only before running tests.
+            if targ == 'all':
+                targetlist.extend(['meson-test-prereq', 'meson-benchmark-prereq'])
+            for t in deps.values():
+                # Add the first output of each target to the 'all' target so that
+                # they are all built
+                targetlist.append(os.path.join(self.get_target_dir(t), t.get_outputs()[0]))
 
-        elem = NinjaBuildElement(self.all_outputs, 'all', 'phony', targetlist)
-        self.add_build(elem)
+            elem = NinjaBuildElement(self.all_outputs, targ, 'phony', targetlist)
+            self.add_build(elem)
 
-        elem = NinjaBuildElement(self.all_outputs, 'meson-clean', 'CUSTOM_COMMAND', 'PHONY')
+        elem = self.create_phony_target(self.all_outputs, 'clean', 'CUSTOM_COMMAND', 'PHONY')
         elem.add_item('COMMAND', self.ninja_command + ['-t', 'clean'])
         elem.add_item('description', 'Cleaning')
-        # Alias that runs the above-defined meson-clean target
-        self.create_target_alias('meson-clean')
 
         # If we have custom targets in this project, add all their outputs to
         # the list that is passed to the `cleantrees.py` script. The script

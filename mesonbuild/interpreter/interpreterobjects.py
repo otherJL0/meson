@@ -16,10 +16,10 @@ from ..modules import ModuleReturnValue, ModuleObject, ModuleState, ExtensionMod
 from ..backend.backends import TestProtocol
 from ..interpreterbase import (
                                ContainerTypeInfo, KwargInfo, MesonOperator,
-                               InterpreterObject, MesonInterpreterObject, ObjectHolder, MutableInterpreterObject,
-                               FeatureCheckBase, FeatureNew, FeatureDeprecated,
+                               MesonInterpreterObject, ObjectHolder, MutableInterpreterObject,
+                               FeatureNew, FeatureDeprecated,
                                typed_pos_args, typed_kwargs, typed_operator,
-                               noArgsFlattening, noPosargs, noKwargs, unholder_return, TYPE_var, TYPE_kwargs, TYPE_nvar, TYPE_nkwargs,
+                               noArgsFlattening, noPosargs, noKwargs, unholder_return,
                                flatten, resolve_second_level_holders, InterpreterException, InvalidArguments, InvalidCode)
 from ..interpreter.type_checking import NoneType, ENV_SEPARATOR_KW
 from ..dependencies import Dependency, ExternalLibrary, InternalDependency
@@ -32,7 +32,7 @@ if T.TYPE_CHECKING:
     from . import kwargs
     from ..cmake.interpreter import CMakeInterpreter
     from ..envconfig import MachineInfo
-    from ..interpreterbase import SubProject
+    from ..interpreterbase import FeatureCheckBase, InterpreterObject, SubProject, TYPE_var, TYPE_kwargs, TYPE_nvar, TYPE_nkwargs
     from .interpreter import Interpreter
 
     from typing_extensions import TypedDict
@@ -87,8 +87,9 @@ class FeatureOptionHolder(ObjectHolder[coredata.UserFeatureOption]):
     def __init__(self, option: coredata.UserFeatureOption, interpreter: 'Interpreter'):
         super().__init__(option, interpreter)
         if option and option.is_auto():
-            # TODO: we need to case here because options is not a TypedDict
-            self.held_object = T.cast('coredata.UserFeatureOption', self.env.coredata.options[OptionKey('auto_features')])
+            # TODO: we need to cast here because options is not a TypedDict
+            auto = T.cast('coredata.UserFeatureOption', self.env.coredata.options[OptionKey('auto_features')])
+            self.held_object = copy.copy(auto)
             self.held_object.name = option.name
         self.methods.update({'enabled': self.enabled_method,
                              'disabled': self.disabled_method,
@@ -479,7 +480,7 @@ class DependencyHolder(ObjectHolder[Dependency]):
         KwargInfo('default_value', (str, NoneType)),
         KwargInfo('pkgconfig_define', ContainerTypeInfo(list, str, pairs=True), default=[], listify=True),
     )
-    def variable_method(self, args: T.Tuple[T.Optional[str]], kwargs: 'kwargs.DependencyGetVariable') -> T.Union[str, T.List[str]]:
+    def variable_method(self, args: T.Tuple[T.Optional[str]], kwargs: 'kwargs.DependencyGetVariable') -> str:
         default_varname = args[0]
         if default_varname is not None:
             FeatureNew('Positional argument to dependency.get_variable()', '0.58.0').use(self.subproject, self.current_node)

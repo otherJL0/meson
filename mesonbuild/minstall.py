@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 from glob import glob
 from pathlib import Path
 import argparse
 import errno
 import os
-import pickle
 import shlex
 import shutil
 import subprocess
@@ -26,13 +26,8 @@ import typing as T
 
 from . import build
 from . import environment
-from .backend.backends import (
-    InstallData, InstallDataBase, InstallEmptyDir, InstallSymlinkData,
-    TargetInstallData, ExecutableSerialisation
-)
-from .coredata import major_versions_differ, MesonVersionMismatchException
-from .coredata import version as coredata_version
-from .mesonlib import MesonException, Popen_safe, RealPathAction, is_windows, setup_vsenv
+from .backend.backends import InstallData
+from .mesonlib import MesonException, Popen_safe, RealPathAction, is_windows, setup_vsenv, pickle_load
 from .scripts import depfixer, destdir_join
 from .scripts.meson_exe import run_exe
 try:
@@ -43,6 +38,10 @@ except ImportError:
     main_file = None
 
 if T.TYPE_CHECKING:
+    from .backend.backends import (
+            ExecutableSerialisation, InstallDataBase, InstallEmptyDir,
+            InstallSymlinkData, TargetInstallData
+    )
     from .mesonlib import FileMode
 
     try:
@@ -131,13 +130,9 @@ class DirMaker:
 
 
 def load_install_data(fname: str) -> InstallData:
-    with open(fname, 'rb') as ifile:
-        obj = pickle.load(ifile)
-        if not isinstance(obj, InstallData) or not hasattr(obj, 'version'):
-            raise MesonVersionMismatchException('<unknown>', coredata_version)
-        if major_versions_differ(obj.version, coredata_version):
-            raise MesonVersionMismatchException(obj.version, coredata_version)
-        return obj
+    obj = pickle_load(fname, 'InstallData', InstallData)
+    assert isinstance(obj, InstallData), 'fo mypy'
+    return obj
 
 def is_executable(path: str, follow_symlinks: bool = False) -> bool:
     '''Checks whether any of the "x" bits are set in the source file mode.'''
@@ -431,10 +426,12 @@ class Installer:
         append_to_log(self.lf, to_file)
         return True
 
-    def do_symlink(self, target: str, link: str, full_dst_dir: str, allow_missing: bool) -> bool:
+    def do_symlink(self, target: str, link: str, destdir: str, full_dst_dir: str, allow_missing: bool) -> bool:
         abs_target = target
         if not os.path.isabs(target):
             abs_target = os.path.join(full_dst_dir, target)
+        elif not os.path.exists(abs_target) and not allow_missing:
+            abs_target = destdir_join(destdir, abs_target)
         if not os.path.exists(abs_target) and not allow_missing:
             raise MesonException(f'Tried to install symlink to missing file {abs_target}')
         if os.path.exists(link):
@@ -604,7 +601,7 @@ class Installer:
             full_dst_dir = get_destdir_path(destdir, fullprefix, s.install_path)
             full_link_name = get_destdir_path(destdir, fullprefix, s.name)
             dm.makedirs(full_dst_dir, exist_ok=True)
-            if self.do_symlink(s.target, full_link_name, full_dst_dir, s.allow_missing):
+            if self.do_symlink(s.target, full_link_name, destdir, full_dst_dir, s.allow_missing):
                 self.did_install_something = True
 
     def install_man(self, d: InstallData, dm: DirMaker, destdir: str, fullprefix: str) -> None:

@@ -6,7 +6,7 @@ import itertools
 
 from pathlib import Path
 from . import build, minstall, dependencies
-from .mesonlib import MesonException, RealPathAction, is_windows, setup_vsenv, OptionKey, quote_arg
+from .mesonlib import MesonException, RealPathAction, is_windows, setup_vsenv, OptionKey, quote_arg, get_wine_shortpath
 from . import mlog
 
 import typing as T
@@ -28,14 +28,20 @@ def get_windows_shell() -> str:
     result = subprocess.check_output(command)
     return result.decode().strip()
 
-def get_env(b: build.Build, build_dir: str) -> T.Tuple[T.Dict[str, str], T.Set[str]]:
+def reduce_winepath(env: T.Dict[str, str]) -> None:
+    winepath = env.get('WINEPATH')
+    if not winepath:
+        return
+    winecmd = shutil.which('wine64') or shutil.which('wine')
+    if not winecmd:
+        return
+    env['WINEPATH'] = get_wine_shortpath([winecmd], winepath.split(';'))
+    mlog.log('Meson detected wine and has set WINEPATH accordingly')
+
+def get_env(b: build.Build) -> T.Tuple[T.Dict[str, str], T.Set[str]]:
     extra_env = build.EnvironmentVariables()
     extra_env.set('MESON_DEVENV', ['1'])
     extra_env.set('MESON_PROJECT_NAME', [b.project_name])
-
-    meson_uninstalled = Path(build_dir) / 'meson-uninstalled'
-    if meson_uninstalled.is_dir():
-        extra_env.prepend('PKG_CONFIG_PATH', [str(meson_uninstalled)])
 
     env = os.environ.copy()
     varnames = set()
@@ -43,12 +49,14 @@ def get_env(b: build.Build, build_dir: str) -> T.Tuple[T.Dict[str, str], T.Set[s
         env = i.get_env(env)
         varnames |= i.get_names()
 
+    reduce_winepath(env)
+
     return env, varnames
 
 def bash_completion_files(b: build.Build, install_data: 'InstallData') -> T.List[str]:
     result = []
     dep = dependencies.PkgConfigDependency('bash-completion', b.environment,
-                                           {'silent': True, 'version': '>=2.10'})
+                                           {'required': False, 'silent': True, 'version': '>=2.10'})
     if dep.found():
         prefix = b.environment.coredata.get_option(OptionKey('prefix'))
         assert isinstance(prefix, str), 'for mypy'
@@ -114,7 +122,7 @@ def run(options: argparse.Namespace) -> int:
         raise MesonException(f'Directory {options.wd!r} does not seem to be a Meson build directory.')
     b = build.load(options.wd)
 
-    devenv, varnames = get_env(b, options.wd)
+    devenv, varnames = get_env(b)
     if options.dump:
         if options.command:
             raise MesonException('--dump option does not allow running other command.')
@@ -137,9 +145,8 @@ def run(options: argparse.Namespace) -> int:
             args = [shell_env]
         elif is_windows():
             shell = get_windows_shell()
-            if shell == 'powershell.exe':
-                args = ['powershell.exe']
-                args += ['-NoLogo', '-NoExit']
+            if shell in ['powershell.exe', 'pwsh.exe']:
+                args = [shell, '-NoLogo', '-NoExit']
                 prompt = f'function global:prompt {{  "{prompt_prefix} PS " + $PWD + "> "}}'
                 args += ['-Command', prompt]
             else:
@@ -165,3 +172,5 @@ def run(options: argparse.Namespace) -> int:
                                cwd=options.wd)
     except subprocess.CalledProcessError as e:
         return e.returncode
+    except FileNotFoundError:
+        raise MesonException(f'Command not found: {args[0]}')

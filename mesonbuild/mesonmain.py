@@ -18,17 +18,16 @@ import sys
 sys.modules['pathlib'] = _pathlib
 
 import os.path
+import platform
 import importlib
 import traceback
 import argparse
-import codecs
 import shutil
 
 from . import mesonlib
 from . import mlog
 from . import mconf, mdist, minit, minstall, mintro, msetup, mtest, rewriter, msubprojects, munstable_coredata, mcompile, mdevenv
 from .mesonlib import MesonException, MesonBugException
-from .environment import detect_msys2_arch
 from .wrap import wraptool
 from .scripts import env2mfile
 
@@ -93,8 +92,9 @@ class CommandLineParser:
         for i in [name] + aliases:
             self.commands[i] = p
 
-    def add_runpython_arguments(self, parser):
+    def add_runpython_arguments(self, parser: argparse.ArgumentParser):
         parser.add_argument('-c', action='store_true', dest='eval_arg', default=False)
+        parser.add_argument('--version', action='version', version=platform.python_version())
         parser.add_argument('script_file')
         parser.add_argument('script_args', nargs=argparse.REMAINDER)
 
@@ -206,22 +206,9 @@ def run_script_command(script_name, script_args):
 
 def ensure_stdout_accepts_unicode():
     if sys.stdout.encoding and not sys.stdout.encoding.upper().startswith('UTF-'):
-        if sys.version_info >= (3, 7):
-            sys.stdout.reconfigure(errors='surrogateescape')
-        else:
-            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach(),
-                                                   errors='surrogateescape')
-            sys.stdout.encoding = 'UTF-8'
-            if not hasattr(sys.stdout, 'buffer'):
-                sys.stdout.buffer = sys.stdout.raw if hasattr(sys.stdout, 'raw') else sys.stdout
+        sys.stdout.reconfigure(errors='surrogateescape')
 
 def run(original_args, mainfile):
-    if sys.version_info < (3, 7):
-        print('Meson works correctly only with python 3.7+.')
-        print(f'You have python {sys.version}.')
-        print('Please update your environment')
-        return 1
-
     if sys.version_info >= (3, 10) and os.environ.get('MESON_RUNNING_IN_PROJECT_TESTS'):
         # workaround for https://bugs.python.org/issue34624
         import warnings
@@ -233,13 +220,9 @@ def run(original_args, mainfile):
     ensure_stdout_accepts_unicode()
 
     # https://github.com/mesonbuild/meson/issues/3653
-    if sys.platform.lower() == 'msys':
-        mlog.error('This python3 seems to be msys/python on MSYS2 Windows, which is known to have path semantics incompatible with Meson')
-        msys2_arch = detect_msys2_arch()
-        if msys2_arch:
-            mlog.error('Please install and use mingw-w64-i686-python3 and/or mingw-w64-x86_64-python3 with Pacman')
-        else:
-            mlog.error('Please download and use Python as detailed at: https://mesonbuild.com/Getting-meson.html')
+    if sys.platform == 'cygwin' and os.environ.get('MSYSTEM', '') not in ['MSYS', '']:
+        mlog.error('This python3 seems to be msys/python on MSYS2 Windows, but you are in a MinGW environment')
+        mlog.error('Please install and use mingw-w64-x86_64-python3 and/or mingw-w64-x86_64-meson with Pacman')
         return 2
 
     # Set the meson command that will be used to run scripts and so on

@@ -14,12 +14,19 @@
 
 # This class contains the basic functionality needed to run any interpreter
 # or an interpreter-based tool.
+from __future__ import annotations
 
-from .common import CMakeException, CMakeTarget, TargetOptions, CMakeConfiguration, language_map, cmake_get_generator_args, check_cmake_args
+from functools import lru_cache
+from os import environ
+from pathlib import Path
+import re
+import typing as T
+
+from .common import CMakeException, CMakeTarget, language_map, cmake_get_generator_args, check_cmake_args
 from .fileapi import CMakeFileAPI
 from .executor import CMakeExecutor
 from .toolchain import CMakeToolchain, CMakeExecScope
-from .traceparser import CMakeTraceParser, CMakeGeneratorTarget
+from .traceparser import CMakeTraceParser
 from .tracetargets import resolve_cmake_trace_targets
 from .. import mlog, mesonlib
 from ..mesonlib import MachineChoice, OrderedSet, path_is_in_root, relative_to_if_possible, OptionKey
@@ -27,12 +34,6 @@ from ..mesondata import DataFile
 from ..compilers.compilers import assembler_suffixes, lang_suffixes, header_suffixes, obj_suffixes, lib_suffixes, is_header
 from ..programs import ExternalProgram
 from ..coredata import FORBIDDEN_TARGET_NAMES
-from functools import lru_cache
-from pathlib import Path
-import typing as T
-import re
-from os import environ
-
 from ..mparser import (
     Token,
     BaseNode,
@@ -51,6 +52,8 @@ from ..mparser import (
 
 
 if T.TYPE_CHECKING:
+    from .common import CMakeConfiguration, TargetOptions
+    from .traceparser import CMakeGeneratorTarget
     from .._typing import ImmutableListProtocol
     from ..build import Build
     from ..backend.backends import Backend
@@ -714,7 +717,7 @@ class ConverterCustomTarget:
             # targets, etc. This reduces the chance of misdetecting input files
             # as outputs from other targets.
             # See https://github.com/mesonbuild/meson/issues/6632
-            if not raw.is_absolute() and (self.current_src_dir / raw).exists():
+            if not raw.is_absolute() and (self.current_src_dir / raw).is_file():
                 self.inputs += [(self.current_src_dir / raw).relative_to(root_src_dir).as_posix()]
             elif raw.is_absolute() and raw.exists() and rel_to_root is not None:
                 self.inputs += [rel_to_root.as_posix()]
@@ -777,14 +780,14 @@ class CMakeInterpreter:
         # Raw CMake results
         self.bs_files          = []    # type: T.List[Path]
         self.codemodel_configs = None  # type: T.Optional[T.List[CMakeConfiguration]]
-        self.raw_trace         = None  # type: T.Optional[str]
+        self.cmake_stderr      = None  # type: T.Optional[str]
 
         # Analysed data
         self.project_name      = ''
         self.languages         = []  # type: T.List[str]
         self.targets           = []  # type: T.List[ConverterTarget]
         self.custom_targets    = []  # type: T.List[ConverterCustomTarget]
-        self.trace             = CMakeTraceParser('', Path('.'), self.env)  # Will be replaced in analyse
+        self.trace: CMakeTraceParser
         self.output_target_map = OutputTargetMap(self.build_dir)
 
         # Generated meson data
@@ -841,13 +844,17 @@ class CMakeInterpreter:
             final_args = cmake_args + trace_args + cmcmp_args + toolchain.get_cmake_args() + [self.src_dir.as_posix()]
 
             cmake_exe.set_exec_mode(print_cmout=True, always_capture_stderr=self.trace.requires_stderr())
-            rc, _, self.raw_trace = cmake_exe.call(final_args, self.build_dir, env=os_env, disable_cache=True)
+            rc, _, self.cmake_stderr = cmake_exe.call(final_args, self.build_dir, env=os_env, disable_cache=True)
 
         mlog.log()
         h = mlog.green('SUCCEEDED') if rc == 0 else mlog.red('FAILED')
         mlog.log('CMake configuration:', h)
         if rc != 0:
-            raise CMakeException('Failed to configure the CMake subproject')
+            # get the last CMake error - We only need the message function for this:
+            self.trace.functions = {'message': self.trace.functions['message']}
+            self.trace.parse(self.cmake_stderr)
+            error = f': {self.trace.errors[-1]}' if self.trace.errors else ''
+            raise CMakeException(f'Failed to configure the CMake subproject{error}')
 
         return cmake_exe
 
@@ -879,7 +886,7 @@ class CMakeInterpreter:
         self.custom_targets = []
 
         # Parse the trace
-        self.trace.parse(self.raw_trace)
+        self.trace.parse(self.cmake_stderr)
 
         # Find all targets
         added_target_names = []  # type: T.List[str]

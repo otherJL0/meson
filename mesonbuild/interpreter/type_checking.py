@@ -9,8 +9,10 @@ import typing as T
 
 from .. import compilers
 from ..build import (EnvironmentVariables, EnvInitValueType, CustomTarget, BuildTarget,
-                     CustomTargetIndex, ExtractedObjects, GeneratedList, IncludeDirs)
+                     CustomTargetIndex, ExtractedObjects, GeneratedList, IncludeDirs,
+                     BothLibraries, SharedLibrary, StaticLibrary, Jar, Executable)
 from ..coredata import UserFeatureOption
+from ..dependencies import Dependency, InternalDependency
 from ..interpreterbase.decorators import KwargInfo, ContainerTypeInfo
 from ..mesonlib import File, FileMode, MachineChoice, listify, has_path_sep, OptionKey
 from ..programs import ExternalProgram
@@ -105,6 +107,37 @@ def _lower_strlist(input: T.List[str]) -> T.List[str]:
     mypy (but not pyright) gets confused about using a lambda as the convertor function
     """
     return [i.lower() for i in input]
+
+
+def variables_validator(contents: T.Union[T.List[str], T.Dict[str, str]]) -> T.Optional[str]:
+    if isinstance(contents, dict):
+        variables = contents
+    else:
+        variables = {}
+        for v in contents:
+            try:
+                key, val = v.split('=', 1)
+            except ValueError:
+                return f'variable {v!r} must have a value separated by equals sign.'
+            variables[key.strip()] = val.strip()
+    for k, v in variables.items():
+        if not k:
+            return 'empty variable name'
+        if not v:
+            return 'empty variable value'
+        if any(c.isspace() for c in k):
+            return f'invalid whitespace in variable name {k!r}'
+    return None
+
+
+def variables_convertor(contents: T.Union[T.List[str], T.Dict[str, str]]) -> T.Dict[str, str]:
+    if isinstance(contents, dict):
+        return contents
+    variables = {}
+    for v in contents:
+        key, val = v.split('=', 1)
+        variables[key.strip()] = val.strip()
+    return variables
 
 
 NATIVE_KW = KwargInfo(
@@ -268,13 +301,20 @@ def _output_validator(outputs: T.List[str]) -> T.Optional[str]:
 
     return None
 
-CT_OUTPUT_KW: KwargInfo[T.List[str]] = KwargInfo(
+MULTI_OUTPUT_KW: KwargInfo[T.List[str]] = KwargInfo(
     'output',
     ContainerTypeInfo(list, str, allow_empty=False),
     listify=True,
     required=True,
     default=[],
     validator=_output_validator,
+)
+
+OUTPUT_KW: KwargInfo[str] = KwargInfo(
+    'output',
+    str,
+    required=True,
+    validator=lambda x: _output_validator([x])
 )
 
 CT_INPUT_KW: KwargInfo[T.List[T.Union[str, File, ExternalProgram, BuildTarget, CustomTarget, CustomTargetIndex, ExtractedObjects, GeneratedList]]] = KwargInfo(
@@ -297,11 +337,12 @@ INSTALL_TAG_KW: KwargInfo[T.Optional[str]] = KwargInfo('install_tag', (str, None
 
 INSTALL_KW = KwargInfo('install', bool, default=False)
 
-CT_INSTALL_DIR_KW: KwargInfo[T.List[T.Union[str, bool]]] = KwargInfo(
+CT_INSTALL_DIR_KW: KwargInfo[T.List[T.Union[str, Literal[False]]]] = KwargInfo(
     'install_dir',
     ContainerTypeInfo(list, (str, bool)),
     listify=True,
     default=[],
+    validator=lambda x: 'must be `false` if boolean' if True in x else None,
 )
 
 CT_BUILD_BY_DEFAULT: KwargInfo[T.Optional[bool]] = KwargInfo('build_by_default', (bool, type(None)), since='0.40.0')
@@ -317,8 +358,10 @@ CT_BUILD_ALWAYS_STALE: KwargInfo[T.Optional[bool]] = KwargInfo(
     since='0.47.0',
 )
 
+INSTALL_DIR_KW: KwargInfo[T.Optional[str]] = KwargInfo('install_dir', (str, NoneType))
+
 INCLUDE_DIRECTORIES: KwargInfo[T.List[T.Union[str, IncludeDirs]]] = KwargInfo(
-    'include_dirs',
+    'include_directories',
     ContainerTypeInfo(list, (str, IncludeDirs)),
     listify=True,
     default=[],
@@ -327,7 +370,7 @@ INCLUDE_DIRECTORIES: KwargInfo[T.List[T.Union[str, IncludeDirs]]] = KwargInfo(
 # for cases like default_options and override_options
 DEFAULT_OPTIONS: KwargInfo[T.List[str]] = KwargInfo(
     'default_options',
-    ContainerTypeInfo(list, (str, IncludeDirs)),
+    ContainerTypeInfo(list, str),
     listify=True,
     default=[],
     validator=_options_validator,
@@ -336,4 +379,62 @@ DEFAULT_OPTIONS: KwargInfo[T.List[str]] = KwargInfo(
 ENV_METHOD_KW = KwargInfo('method', str, default='set', since='0.62.0',
     validator=in_set_validator({'set', 'prepend', 'append'}))
 
-ENV_SEPARATOR_KW = KwargInfo('separator', str, default=os.pathsep, since='0.62.0')
+ENV_SEPARATOR_KW = KwargInfo('separator', str, default=os.pathsep)
+
+DEPENDENCIES_KW: KwargInfo[T.List[Dependency]] = KwargInfo(
+    'dependencies',
+    # InternalDependency is a subclass of Dependency, but we want to
+    # print it in error messages
+    ContainerTypeInfo(list, (Dependency, InternalDependency)),
+    listify=True,
+    default=[],
+)
+
+D_MODULE_VERSIONS_KW: KwargInfo[T.List[T.Union[str, int]]] = KwargInfo(
+    'd_module_versions',
+    ContainerTypeInfo(list, (str, int)),
+    listify=True,
+    default=[],
+)
+
+_link_with_error = '''can only be self-built targets, external dependencies (including libraries) must go in "dependencies".'''
+
+# Allow Dependency for the better error message? But then in other cases it will list this as one of the allowed types!
+LINK_WITH_KW: KwargInfo[T.List[T.Union[BothLibraries, SharedLibrary, StaticLibrary, CustomTarget, CustomTargetIndex, Jar, Executable]]] = KwargInfo(
+    'link_with',
+    ContainerTypeInfo(list, (BothLibraries, SharedLibrary, StaticLibrary, CustomTarget, CustomTargetIndex, Jar, Executable, Dependency)),
+    listify=True,
+    default=[],
+    validator=lambda x: _link_with_error if isinstance(x, Dependency) else None,
+)
+
+def link_whole_validator(values: T.List[T.Union[StaticLibrary, CustomTarget, CustomTargetIndex, Dependency]]) -> T.Optional[str]:
+    for l in values:
+        if isinstance(l, (CustomTarget, CustomTargetIndex)) and l.links_dynamically():
+            return f'{type(l).__name__} returning a shared library is not allowed'
+        if isinstance(l, Dependency):
+            return _link_with_error
+    return None
+
+LINK_WHOLE_KW: KwargInfo[T.List[T.Union[BothLibraries, StaticLibrary, CustomTarget, CustomTargetIndex]]] = KwargInfo(
+    'link_whole',
+    ContainerTypeInfo(list, (BothLibraries, StaticLibrary, CustomTarget, CustomTargetIndex, Dependency)),
+    listify=True,
+    default=[],
+    validator=link_whole_validator,
+)
+
+SOURCES_KW: KwargInfo[T.List[T.Union[str, File, CustomTarget, CustomTargetIndex, GeneratedList]]] = KwargInfo(
+    'sources',
+    ContainerTypeInfo(list, (str, File, CustomTarget, CustomTargetIndex, GeneratedList)),
+    listify=True,
+    default=[],
+)
+
+VARIABLES_KW: KwargInfo[T.Dict[str, str]] = KwargInfo(
+    'variables',
+    (ContainerTypeInfo(list, str), ContainerTypeInfo(dict, str)),
+    validator=variables_validator,
+    convertor=variables_convertor,
+    default={},
+)

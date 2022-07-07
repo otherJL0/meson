@@ -29,8 +29,8 @@ from mesonbuild.interpreterbase.decorators import FeatureDeprecated
 from .. import mesonlib, mlog
 from ..compilers import AppleClangCCompiler, AppleClangCPPCompiler, detect_compiler_for
 from ..environment import get_llvm_tool_names
-from ..mesonlib import version_compare, stringlistify, extract_as_list, MachineChoice
-from .base import DependencyException, DependencyMethods, strip_system_libdirs, SystemDependency
+from ..mesonlib import version_compare, stringlistify, extract_as_list
+from .base import DependencyException, DependencyMethods, strip_system_libdirs, SystemDependency, ExternalDependency, DependencyTypeName
 from .cmake import CMakeDependency
 from .configtool import ConfigToolDependency
 from .factory import DependencyFactory
@@ -39,7 +39,8 @@ from .pkgconfig import PkgConfigDependency
 
 if T.TYPE_CHECKING:
     from ..envconfig import MachineInfo
-    from .. environment import Environment
+    from ..environment import Environment
+    from ..mesonlib import MachineChoice
     from typing_extensions import TypedDict
 
     class JNISystemDependencyKW(TypedDict):
@@ -403,7 +404,25 @@ class LLVMDependencyCMake(CMakeDependency):
     def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
         self.llvm_modules = stringlistify(extract_as_list(kwargs, 'modules'))
         self.llvm_opt_modules = stringlistify(extract_as_list(kwargs, 'optional_modules'))
-        super().__init__(name, env, kwargs, language='cpp')
+
+        compilers = None
+        if kwargs.get('native', False):
+            compilers = env.coredata.compilers.build
+        else:
+            compilers = env.coredata.compilers.host
+        if not compilers or not all(x in compilers for x in ('c', 'cpp')):
+            # Initialize basic variables
+            ExternalDependency.__init__(self, DependencyTypeName('cmake'), env, kwargs)
+
+            # Initialize CMake specific variables
+            self.found_modules: T.List[str] = []
+            self.name = name
+
+            # Warn and return
+            mlog.warning('The LLVM dependency was not found via CMake since both a C and C++ compiler are required.')
+            return
+
+        super().__init__(name, env, kwargs, language='cpp', force_use_global_compilers=True)
 
         # Cmake will always create a statically linked binary, so don't use
         # cmake if dynamic is required

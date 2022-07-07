@@ -23,7 +23,8 @@ from .. import compilers
 from .. import envconfig
 from ..wrap import wrap, WrapMode
 from .. import mesonlib
-from ..mesonlib import MesonBugException, HoldableObject, FileMode, MachineChoice, OptionKey, listify, extract_as_list, has_path_sep
+from ..mesonlib import (MesonBugException, HoldableObject, FileMode, MachineChoice, OptionKey,
+                        listify, extract_as_list, has_path_sep, PerMachine)
 from ..programs import ExternalProgram, NonExistingExternalProgram
 from ..dependencies import Dependency
 from ..depfile import DepFile
@@ -56,24 +57,35 @@ from .type_checking import (
     CT_BUILD_BY_DEFAULT,
     CT_INPUT_KW,
     CT_INSTALL_DIR_KW,
-    CT_OUTPUT_KW,
+    MULTI_OUTPUT_KW,
+    OUTPUT_KW,
     DEFAULT_OPTIONS,
+    DEPENDENCIES_KW,
     DEPENDS_KW,
     DEPEND_FILES_KW,
     DEPFILE_KW,
     DISABLER_KW,
+    D_MODULE_VERSIONS_KW,
     ENV_KW,
     ENV_METHOD_KW,
     ENV_SEPARATOR_KW,
+    INCLUDE_DIRECTORIES,
     INSTALL_KW,
+    INSTALL_DIR_KW,
     INSTALL_MODE_KW,
+    LINK_WITH_KW,
+    LINK_WHOLE_KW,
     CT_INSTALL_TAG_KW,
     INSTALL_TAG_KW,
     LANGUAGE_KW,
-    NATIVE_KW, OVERRIDE_OPTIONS_KW,
+    NATIVE_KW,
     REQUIRED_KW,
+    SOURCES_KW,
+    VARIABLES_KW,
     NoneType,
     in_set_validator,
+    variables_validator,
+    variables_convertor,
     env_convertor_with_method
 )
 from . import primitives as P_OBJ
@@ -88,6 +100,7 @@ import collections
 import typing as T
 import textwrap
 import importlib
+import copy
 
 if T.TYPE_CHECKING:
     import argparse
@@ -303,6 +316,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         self.build_func_dict()
         self.build_holder_map()
         self.user_defined_options = user_defined_options
+        self.compilers: PerMachine[T.Dict[str, 'compilers.Compiler']] = PerMachine({}, {})
 
         # build_def_files needs to be defined before parse_project is called
         #
@@ -343,6 +357,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                            'add_global_link_arguments': self.func_add_global_link_arguments,
                            'add_languages': self.func_add_languages,
                            'add_project_arguments': self.func_add_project_arguments,
+                           'add_project_dependencies': self.func_add_project_dependencies,
                            'add_project_link_arguments': self.func_add_project_link_arguments,
                            'add_test_setup': self.func_add_test_setup,
                            'alias_target': self.func_alias_target,
@@ -353,6 +368,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                            'configuration_data': self.func_configuration_data,
                            'configure_file': self.func_configure_file,
                            'custom_target': self.func_custom_target,
+                           'debug': self.func_debug,
                            'declare_dependency': self.func_declare_dependency,
                            'dependency': self.func_dependency,
                            'disabler': self.func_disabler,
@@ -416,6 +432,7 @@ class Interpreter(InterpreterBase, HoldableObject):
             bool: P_OBJ.BooleanHolder,
             str: P_OBJ.StringHolder,
             P_OBJ.MesonVersionString: P_OBJ.MesonVersionStringHolder,
+            P_OBJ.DependencyVariableString: P_OBJ.DependencyVariableStringHolder,
 
             # Meson types
             mesonlib.File: OBJ.FileHolder,
@@ -614,67 +631,79 @@ class Interpreter(InterpreterBase, HoldableObject):
     @typed_pos_args('files', varargs=str)
     @noKwargs
     def func_files(self, node: mparser.FunctionNode, args: T.Tuple[T.List[str]], kwargs: 'TYPE_kwargs') -> T.List[mesonlib.File]:
-        return [mesonlib.File.from_source_file(self.environment.source_dir, self.subdir, fname) for fname in args[0]]
+        return self.source_strings_to_files(args[0])
 
-    # Used by declare_dependency() and pkgconfig.generate()
-    def extract_variables(self, kwargs, argname='variables', list_new=False, dict_new=False):
+    # Used by pkgconfig.generate()
+    def extract_variables(self, kwargs: T.Dict[str, T.Union[T.Dict[str, str], T.List[str], str]],
+                          argname: str = 'variables', list_new: bool = False,
+                          dict_new: bool = False) -> T.Dict[str, str]:
         variables = kwargs.get(argname, {})
         if isinstance(variables, dict):
             if dict_new and variables:
                 FeatureNew.single_use(f'{argname} as dictionary', '0.56.0', self.subproject, location=self.current_node)
         else:
-            varlist = mesonlib.stringlistify(variables)
+            variables = mesonlib.stringlistify(variables)
             if list_new:
                 FeatureNew.single_use(f'{argname} as list of strings', '0.56.0', self.subproject, location=self.current_node)
-            variables = collections.OrderedDict()
-            for v in varlist:
-                try:
-                    (key, value) = v.split('=', 1)
-                except ValueError:
-                    raise InterpreterException(f'Variable {v!r} must have a value separated by equals sign.')
-                variables[key.strip()] = value.strip()
+
+        invalid_msg = variables_validator(variables)
+        if invalid_msg is not None:
+            raise InterpreterException(invalid_msg)
+
+        variables = variables_convertor(variables)
         for k, v in variables.items():
-            if not k or not v:
-                raise InterpreterException('Empty variable name or value')
-            if any(c.isspace() for c in k):
-                raise InterpreterException(f'Invalid whitespace in variable name "{k}"')
             if not isinstance(v, str):
                 raise InterpreterException('variables values must be strings.')
+
         return variables
 
-    @FeatureNewKwargs('declare_dependency', '0.46.0', ['link_whole'])
-    @FeatureNewKwargs('declare_dependency', '0.54.0', ['variables'])
-    @FeatureNewKwargs('declare_dependency', '0.62.0', ['d_module_versions', 'd_import_dirs'])
-    @permittedKwargs({'include_directories', 'link_with', 'sources', 'dependencies',
-                      'compile_args', 'link_args', 'link_whole', 'version',
-                      'variables', 'd_module_versions', 'd_import_dirs'})
     @noPosargs
+    @typed_kwargs(
+        'declare_dependency',
+        KwargInfo('compile_args', ContainerTypeInfo(list, str), listify=True, default=[]),
+        INCLUDE_DIRECTORIES.evolve(name='d_import_dirs', since='0.62.0'),
+        D_MODULE_VERSIONS_KW.evolve(since='0.62.0'),
+        KwargInfo('link_args', ContainerTypeInfo(list, str), listify=True, default=[]),
+        DEPENDENCIES_KW,
+        INCLUDE_DIRECTORIES,
+        LINK_WITH_KW,
+        LINK_WHOLE_KW.evolve(since='0.46.0'),
+        SOURCES_KW,
+        VARIABLES_KW.evolve(since='0.54.0', since_values={list: '0.56.0'}),
+        KwargInfo('version', (str, NoneType)),
+    )
     def func_declare_dependency(self, node, args, kwargs):
-        version = kwargs.get('version', self.project_version)
-        if not isinstance(version, str):
-            raise InterpreterException('Version must be a string.')
+        deps = kwargs['dependencies']
         incs = self.extract_incdirs(kwargs)
-        libs = extract_as_list(kwargs, 'link_with')
-        libs_whole = extract_as_list(kwargs, 'link_whole')
-        sources = extract_as_list(kwargs, 'sources')
-        sources = listify(self.source_strings_to_files(sources))
-        deps = extract_as_list(kwargs, 'dependencies')
-        compile_args = mesonlib.stringlistify(kwargs.get('compile_args', []))
-        link_args = mesonlib.stringlistify(kwargs.get('link_args', []))
-        variables = self.extract_variables(kwargs, list_new=True)
-        d_module_versions = extract_as_list(kwargs, 'd_module_versions')
+        libs = kwargs['link_with']
+        libs_whole = kwargs['link_whole']
+        sources = self.source_strings_to_files(kwargs['sources'])
+        compile_args = kwargs['compile_args']
+        link_args = kwargs['link_args']
+        variables = kwargs['variables']
+        version = kwargs['version']
+        if version is None:
+            version = self.project_version
+        d_module_versions = kwargs['d_module_versions']
         d_import_dirs = self.extract_incdirs(kwargs, 'd_import_dirs')
-        final_deps = []
+        srcdir = Path(self.environment.source_dir)
+        # convert variables which refer to an -uninstalled.pc style datadir
+        for k, v in variables.items():
+            try:
+                p = Path(v)
+            except ValueError:
+                continue
+            else:
+                if not self.is_subproject() and srcdir / self.subproject_dir in p.parents:
+                    continue
+                if p.is_absolute() and p.is_dir() and srcdir / self.root_subdir in [p] + list(Path(os.path.abspath(p)).parents):
+                    variables[k] = P_OBJ.DependencyVariableString(v)
         for d in deps:
-            if not isinstance(d, (dependencies.Dependency, dependencies.ExternalLibrary, dependencies.InternalDependency)):
-                raise InterpreterException('Dependencies must be external deps')
-            final_deps.append(d)
-        for l in libs:
-            if isinstance(l, dependencies.Dependency):
-                raise InterpreterException('''Entries in "link_with" may only be self-built targets,
-external dependencies (including libraries) must go to "dependencies".''')
+            if not isinstance(d, dependencies.Dependency):
+                raise InterpreterException('Invalid dependency')
+
         dep = dependencies.InternalDependency(version, incs, compile_args,
-                                              link_args, libs, libs_whole, sources, final_deps,
+                                              link_args, libs, libs_whole, sources, deps,
                                               variables, d_module_versions, d_import_dirs)
         return dep
 
@@ -743,7 +772,12 @@ external dependencies (including libraries) must go to "dependencies".''')
                           'configuration')
         expanded_args: T.List[str] = []
         if isinstance(cmd, build.Executable):
-            progname = node.args.arguments[0].value
+            for name, exe in self.build.find_overrides.items():
+                if cmd == exe:
+                    progname = name
+                    break
+            else:
+                raise MesonBugException('cmd was a built executable but not found in overrides table')
             raise InterpreterException(overridden_msg.format(progname, cmd.description()))
         if isinstance(cmd, ExternalProgram):
             if not cmd.found():
@@ -821,7 +855,6 @@ external dependencies (including libraries) must go to "dependencies".''')
         sub = SubprojectHolder(NullSubprojectInterpreter(), os.path.join(self.subproject_dir, subp_name),
                                disabled_feature=disabled_feature, exception=exception)
         self.subprojects[subp_name] = sub
-        self.coredata.initialized_subprojects.add(subp_name)
         return sub
 
     def do_subproject(self, subp_name: str, method: Literal['meson', 'cmake'], kwargs: kwargs.DoSubproject) -> SubprojectHolder:
@@ -945,7 +978,6 @@ external dependencies (including libraries) must go to "dependencies".''')
         self.build_def_files.update(subi.build_def_files)
         self.build.merge(subi.build)
         self.build.subprojects[subp_name] = subi.project_version
-        self.coredata.initialized_subprojects.add(subp_name)
         return self.subprojects[subp_name]
 
     def _do_subproject_cmake(self, subp_name: str, subdir: str, subdir_abs: str,
@@ -971,7 +1003,7 @@ external dependencies (including libraries) must go to "dependencies".''')
 
                 # Debug print the generated meson file
                 from ..ast import AstIndentationGenerator, AstPrinter
-                printer = AstPrinter()
+                printer = AstPrinter(update_ast_line_nos=True)
                 ast.accept(AstIndentationGenerator())
                 ast.accept(printer)
                 printer.post_process()
@@ -1126,6 +1158,7 @@ external dependencies (including libraries) must go to "dependencies".''')
             default_options = self.project_default_options.copy()
             default_options.update(self.default_project_options)
             self.coredata.init_builtins(self.subproject)
+            self.coredata.initialized_subprojects.add(self.subproject)
         else:
             default_options = {}
         self.coredata.set_default_options(default_options, self.subproject, self.environment)
@@ -1321,6 +1354,13 @@ external dependencies (including libraries) must go to "dependencies".''')
         args_str = [stringifyUserArguments(i) for i in args]
         raise InterpreterException('Problem encountered: ' + ' '.join(args_str))
 
+    @noArgsFlattening
+    @FeatureNew('debug', '0.63.0')
+    @noKwargs
+    def func_debug(self, node, args, kwargs):
+        args_str = [stringifyUserArguments(i) for i in args]
+        mlog.debug('Debug:', *args_str)
+
     @noKwargs
     @noPosargs
     def func_exception(self, node, args, kwargs):
@@ -1345,7 +1385,7 @@ external dependencies (including libraries) must go to "dependencies".''')
 
     def add_languages_for(self, args: T.List[str], required: bool, for_machine: MachineChoice) -> bool:
         args = [a.lower() for a in args]
-        langs = set(self.coredata.compilers[for_machine].keys())
+        langs = set(self.compilers[for_machine].keys())
         langs.update(args)
         # We'd really like to add cython's default language here, but it can't
         # actually be done because the cython compiler hasn't been initialized,
@@ -1359,11 +1399,11 @@ external dependencies (including libraries) must go to "dependencies".''')
 
         success = True
         for lang in sorted(args, key=compilers.sort_clink):
-            clist = self.coredata.compilers[for_machine]
+            if lang in self.compilers[for_machine]:
+                continue
             machine_name = for_machine.get_lower_case_name()
-            if lang in clist:
-                comp = clist[lang]
-            else:
+            comp = self.coredata.compilers[for_machine].get(lang)
+            if not comp:
                 try:
                     comp = compilers.detect_compiler_for(self.environment, lang, for_machine)
                     if comp is None:
@@ -1382,6 +1422,15 @@ external dependencies (including libraries) must go to "dependencies".''')
                     else:
                         raise
 
+            # Add per-subproject compiler options. They inherit value from main project.
+            if self.subproject:
+                options = {}
+                for k in comp.get_options():
+                    v = copy.copy(self.coredata.options[k])
+                    k = k.evolve(subproject=self.subproject)
+                    options[k] = v
+                self.coredata.add_compiler_options(options, lang, for_machine, self.environment)
+
             if for_machine == MachineChoice.HOST or self.environment.is_cross_build():
                 logger_fun = mlog.log
             else:
@@ -1392,6 +1441,7 @@ external dependencies (including libraries) must go to "dependencies".''')
                 logger_fun(comp.get_display_language(), 'linker for the', machine_name, 'machine:',
                            mlog.bold(' '.join(comp.linker.get_exelist())), comp.linker.id, comp.linker.version)
             self.build.ensure_static_linker(comp)
+            self.compilers[for_machine][lang] = comp
 
         return success
 
@@ -1693,8 +1743,9 @@ external dependencies (including libraries) must go to "dependencies".''')
         elif target_type == 'shared_library':
             return self.build_target(node, args, kwargs, build.SharedLibrary)
         elif target_type == 'shared_module':
-            FeatureNew('build_target(target_type: \'shared_module\')',
-                       '0.51.0').use(self.subproject)
+            FeatureNew.single_use(
+                'build_target(target_type: \'shared_module\')',
+                '0.51.0', self.subproject, location=node)
             return self.build_target(node, args, kwargs, build.SharedModule)
         elif target_type == 'static_library':
             return self.build_target(node, args, kwargs, build.StaticLibrary)
@@ -1711,7 +1762,7 @@ external dependencies (including libraries) must go to "dependencies".''')
     @typed_kwargs(
         'vcs_tag',
         CT_INPUT_KW.evolve(required=True),
-        CT_OUTPUT_KW,
+        MULTI_OUTPUT_KW,
         # Cannot use the COMMAND_KW because command is allowed to be empty
         KwargInfo(
             'command',
@@ -1731,9 +1782,14 @@ external dependencies (including libraries) must go to "dependencies".''')
         vcs_cmd = kwargs['command']
         source_dir = os.path.normpath(os.path.join(self.environment.get_source_dir(), self.subdir))
         if vcs_cmd:
-            maincmd = self.find_program_impl(vcs_cmd[0], required=False)
-            if maincmd.found():
-                vcs_cmd[0] = maincmd
+            if isinstance(vcs_cmd[0], (str, mesonlib.File)):
+                if isinstance(vcs_cmd[0], mesonlib.File):
+                    FeatureNew.single_use('vcs_tag with file as the first argument', '0.62.0', self.subproject, location=node)
+                maincmd = self.find_program_impl(vcs_cmd[0], required=False)
+                if maincmd.found():
+                    vcs_cmd[0] = maincmd
+            else:
+                FeatureNew.single_use('vcs_tag with custom_tgt, external_program, or exe as the first argument', '0.63.0', self.subproject, location=node)
         else:
             vcs = mesonlib.detect_vcs(source_dir)
             if vcs:
@@ -1750,6 +1806,7 @@ external dependencies (including libraries) must go to "dependencies".''')
             kwargs['output'][0],
             self.subdir,
             self.subproject,
+            self.environment,
             self.environment.get_build_command() +
                 ['--internal',
                 'vcstagger',
@@ -1795,14 +1852,13 @@ external dependencies (including libraries) must go to "dependencies".''')
         CT_INPUT_KW,
         CT_INSTALL_DIR_KW,
         CT_INSTALL_TAG_KW,
-        CT_OUTPUT_KW,
+        MULTI_OUTPUT_KW,
         DEPENDS_KW,
         DEPEND_FILES_KW,
         DEPFILE_KW,
         ENV_KW.evolve(since='0.57.0'),
         INSTALL_KW,
         INSTALL_MODE_KW.evolve(since='0.47.0'),
-        OVERRIDE_OPTIONS_KW,
         KwargInfo('feed', bool, default=False, since='0.59.0'),
         KwargInfo('capture', bool, default=False),
         KwargInfo('console', bool, default=False, since='0.48.0'),
@@ -1870,12 +1926,15 @@ external dependencies (including libraries) must go to "dependencies".''')
                                    f'(there are {len(kwargs["install_tag"])} install_tags, '
                                    f'and {len(kwargs["output"])} outputs)')
 
+        for t in kwargs['output']:
+            self.validate_forbidden_targets(t)
         self._validate_custom_target_outputs(len(inputs) > 1, kwargs['output'], "custom_target")
 
         tg = build.CustomTarget(
             name,
             self.subdir,
             self.subproject,
+            self.environment,
             command,
             inputs,
             kwargs['output'],
@@ -1892,7 +1951,6 @@ external dependencies (including libraries) must go to "dependencies".''')
             install_dir=kwargs['install_dir'],
             install_mode=kwargs['install_mode'],
             install_tag=kwargs['install_tag'],
-            override_options=kwargs['override_options'],
             backend=self.backend)
         self.add_target(tg.name, tg)
         return tg
@@ -1914,7 +1972,8 @@ external dependencies (including libraries) must go to "dependencies".''')
         if isinstance(all_args[0], str):
             all_args[0] = self.find_program_impl([all_args[0]])
         name = args[0]
-        tg = build.RunTarget(name, all_args, kwargs['depends'], self.subdir, self.subproject, kwargs['env'])
+        tg = build.RunTarget(name, all_args, kwargs['depends'], self.subdir, self.subproject, self.environment,
+                             kwargs['env'])
         self.add_target(name, tg)
         full_name = (self.subproject, name)
         assert full_name not in self.build.run_target_names
@@ -1927,7 +1986,7 @@ external dependencies (including libraries) must go to "dependencies".''')
     def func_alias_target(self, node: mparser.BaseNode, args: T.Tuple[str, T.List[build.Target]],
                           kwargs: 'TYPE_kwargs') -> build.AliasTarget:
         name, deps = args
-        tg = build.AliasTarget(name, deps, self.subdir, self.subproject)
+        tg = build.AliasTarget(name, deps, self.subdir, self.subproject, self.environment)
         self.add_target(name, tg)
         return tg
 
@@ -2035,9 +2094,10 @@ external dependencies (including libraries) must go to "dependencies".''')
     @typed_pos_args('install_headers', varargs=(str, mesonlib.File))
     @typed_kwargs(
         'install_headers',
-        KwargInfo('install_dir', (str, NoneType)),
+        KwargInfo('preserve_path', bool, default=False, since='0.63.0'),
         KwargInfo('subdir', (str, NoneType)),
         INSTALL_MODE_KW.evolve(since='0.47.0'),
+        INSTALL_DIR_KW,
     )
     def func_install_headers(self, node: mparser.BaseNode,
                              args: T.Tuple[T.List['mesonlib.FileOrString']],
@@ -2049,19 +2109,32 @@ external dependencies (including libraries) must go to "dependencies".''')
                 raise InterpreterException('install_headers: cannot specify both "install_dir" and "subdir". Use only "install_dir".')
             if os.path.isabs(install_subdir):
                 mlog.deprecation('Subdir keyword must not be an absolute path. This will be a hard error in the next release.')
+        else:
+            install_subdir = ''
 
-        h = build.Headers(source_files, install_subdir, kwargs['install_dir'],
-                          kwargs['install_mode'], self.subproject)
-        self.build.headers.append(h)
+        dirs = collections.defaultdict(list)
+        ret_headers = []
+        if kwargs['preserve_path']:
+            for file in source_files:
+                dirname = os.path.dirname(file.fname)
+                dirs[dirname].append(file)
+        else:
+            dirs[''].extend(source_files)
 
-        return h
+        for childdir in dirs:
+            h = build.Headers(dirs[childdir], os.path.join(install_subdir, childdir), kwargs['install_dir'],
+                              kwargs['install_mode'], self.subproject)
+            ret_headers.append(h)
+            self.build.headers.append(h)
+
+        return ret_headers
 
     @typed_pos_args('install_man', varargs=(str, mesonlib.File))
     @typed_kwargs(
         'install_man',
-        KwargInfo('install_dir', (str, NoneType)),
         KwargInfo('locale', (str, NoneType), since='0.58.0'),
-        INSTALL_MODE_KW.evolve(since='0.47.0')
+        INSTALL_MODE_KW.evolve(since='0.47.0'),
+        INSTALL_DIR_KW,
     )
     def func_install_man(self, node: mparser.BaseNode,
                          args: T.Tuple[T.List['mesonlib.FileOrString']],
@@ -2122,11 +2195,13 @@ external dependencies (including libraries) must go to "dependencies".''')
             args: T.Tuple[object, T.Optional[T.Dict[str, object]]],
             kwargs: 'TYPE_kwargs') -> build.StructuredSources:
         valid_types = (str, mesonlib.File, build.GeneratedList, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList)
-        sources: T.Dict[str, T.List[T.Union['mesonlib.FileOrString', 'build.GeneratedTypes']]] = collections.defaultdict(list)
+        sources: T.Dict[str, T.List[T.Union[mesonlib.File, 'build.GeneratedTypes']]] = collections.defaultdict(list)
 
         for arg in mesonlib.listify(args[0]):
             if not isinstance(arg, valid_types):
                 raise InvalidArguments(f'structured_sources: type "{type(arg)}" is not valid')
+            if isinstance(arg, str):
+                arg = mesonlib.File.from_source_file(self.environment.source_dir, self.subdir, arg)
             sources[''].append(arg)
         if args[1]:
             if '' in args[1]:
@@ -2135,6 +2210,8 @@ external dependencies (including libraries) must go to "dependencies".''')
                 for arg in mesonlib.listify(v):
                     if not isinstance(arg, valid_types):
                         raise InvalidArguments(f'structured_sources: type "{type(arg)}" is not valid')
+                    if isinstance(arg, str):
+                        arg = mesonlib.File.from_source_file(self.environment.source_dir, self.subdir, arg)
                     sources[k].append(arg)
         return build.StructuredSources(sources)
 
@@ -2220,11 +2297,11 @@ external dependencies (including libraries) must go to "dependencies".''')
     @typed_pos_args('install_data', varargs=(str, mesonlib.File))
     @typed_kwargs(
         'install_data',
-        KwargInfo('install_dir', (str, NoneType)),
         KwargInfo('sources', ContainerTypeInfo(list, (str, mesonlib.File)), listify=True, default=[]),
         KwargInfo('rename', ContainerTypeInfo(list, str), default=[], listify=True, since='0.46.0'),
         INSTALL_MODE_KW.evolve(since='0.38.0'),
         INSTALL_TAG_KW.evolve(since='0.60.0'),
+        INSTALL_DIR_KW,
     )
     def func_install_data(self, node: mparser.BaseNode,
                           args: T.Tuple[T.List['mesonlib.FileOrString']],
@@ -2275,6 +2352,13 @@ external dependencies (including libraries) must go to "dependencies".''')
     def func_install_subdir(self, node: mparser.BaseNode, args: T.Tuple[str],
                             kwargs: 'kwargs.FuncInstallSubdir') -> build.InstallDir:
         exclude = (set(kwargs['exclude_files']), set(kwargs['exclude_directories']))
+
+        srcdir = os.path.join(self.environment.source_dir, self.subdir, args[0])
+        if not os.path.isdir(srcdir) or not any(os.scandir(srcdir)):
+            FeatureNew.single_use('install_subdir with empty directory', '0.47.0', self.subproject, location=node)
+            FeatureDeprecated.single_use('install_subdir with empty directory', '0.60.0', self.subproject,
+                                         'It worked by accident and is buggy. Use install_emptydir instead.', node)
+
         idir = build.InstallDir(
             self.subdir,
             args[0],
@@ -2317,7 +2401,7 @@ external dependencies (including libraries) must go to "dependencies".''')
         KwargInfo('install', (bool, NoneType), since='0.50.0'),
         KwargInfo('install_dir', (str, bool), default='',
                   validator=lambda x: 'must be `false` if boolean' if x is True else None),
-        KwargInfo('output', str, required=True),
+        OUTPUT_KW,
         KwargInfo('output_format', str, default='c', since='0.47.0',
                   validator=in_set_validator({'c', 'nasm'})),
     )
@@ -2373,8 +2457,6 @@ external dependencies (including libraries) must go to "dependencies".''')
             mlog.warning('Output file', mlog.bold(ofile_rpath, True), 'for configure_file() at', current_call, 'overwrites configure_file() output at', first_call)
         else:
             self.configure_file_outputs[ofile_rpath] = self.current_lineno
-        if os.path.dirname(output) != '':
-            raise InterpreterException('Output file name must not contain a subdirectory.')
         (ofile_path, ofile_fname) = os.path.split(os.path.join(self.subdir, output))
         ofile_abs = os.path.join(self.environment.build_dir, ofile_path, ofile_fname)
 
@@ -2501,8 +2583,9 @@ external dependencies (including libraries) must go to "dependencies".''')
         for a in incdir_strings:
             if a.startswith(src_root):
                 raise InvalidArguments(textwrap.dedent('''\
-                    Tried to form an absolute path to a source dir.
-                    You should not do that but use relative paths instead.
+                    Tried to form an absolute path to a dir in the source tree.
+                    You should not do that but use relative paths instead, for
+                    directories that are part of your project.
 
                     To get include path to any directory relative to the current dir do
 
@@ -2517,6 +2600,10 @@ external dependencies (including libraries) must go to "dependencies".''')
                     put in the include directories by default so you only need to do
                     include_directories('.') if you intend to use the result in a
                     different subdirectory.
+
+                    Note that this error message can also be triggered by
+                    external dependencies being installed within your source
+                    tree - it's not recommended to do this.
                     '''))
             else:
                 try:
@@ -2610,6 +2697,27 @@ external dependencies (including libraries) must go to "dependencies".''')
     def func_add_project_link_arguments(self, node: mparser.FunctionNode, args: T.Tuple[T.List[str]], kwargs: 'kwargs.FuncAddProjectArgs') -> None:
         self._add_project_arguments(node, self.build.projects_link_args[kwargs['native']], args[0], kwargs)
 
+    @FeatureNew('add_project_dependencies', '0.63.0')
+    @typed_pos_args('add_project_dependencies', varargs=dependencies.Dependency)
+    @typed_kwargs('add_project_dependencies', NATIVE_KW, LANGUAGE_KW)
+    def func_add_project_dependencies(self, node: mparser.FunctionNode, args: T.Tuple[T.List[dependencies.Dependency]], kwargs: 'kwargs.FuncAddProjectArgs') -> None:
+        for_machine = kwargs['native']
+        for lang in kwargs['language']:
+            if lang not in self.compilers[for_machine]:
+                raise InvalidCode(f'add_project_dependencies() called before add_language() for language "{lang}"')
+
+        for d in dependencies.get_leaf_external_dependencies(args[0]):
+            compile_args = list(d.get_compile_args())
+            system_incdir = d.get_include_type() == 'system'
+            for i in d.get_include_dirs():
+                for lang in kwargs['language']:
+                    comp = self.coredata.compilers[for_machine][lang]
+                    for idir in i.to_string_list(self.environment.get_source_dir()):
+                        compile_args.extend(comp.get_include_args(idir, system_incdir))
+
+            self._add_project_arguments(node, self.build.projects_args[for_machine], compile_args, kwargs)
+            self._add_project_arguments(node, self.build.projects_link_args[for_machine], d.get_link_args(), kwargs)
+
     def _warn_about_builtin_args(self, args: T.List[str]) -> None:
         # -Wpedantic is deliberately not included, since some people want to use it but not use -Wextra
         # see e.g.
@@ -2688,7 +2796,13 @@ external dependencies (including libraries) must go to "dependencies".''')
     @typed_pos_args('join_paths', varargs=str, min_varargs=1)
     @noKwargs
     def func_join_paths(self, node: mparser.BaseNode, args: T.Tuple[T.List[str]], kwargs: 'TYPE_kwargs') -> str:
-        return os.path.join(*args[0]).replace('\\', '/')
+        parts = args[0]
+        other = os.path.join('', *parts[1:]).replace('\\', '/')
+        ret = os.path.join(*parts).replace('\\', '/')
+        if isinstance(parts[0], P_OBJ.DependencyVariableString) and '..' not in other:
+            return P_OBJ.DependencyVariableString(ret)
+        else:
+            return ret
 
     def run(self) -> None:
         super().run()
@@ -2697,7 +2811,6 @@ external dependencies (including libraries) must go to "dependencies".''')
         FeatureDeprecated.report(self.subproject)
         if not self.is_subproject():
             self.print_extra_warnings()
-        if self.subproject == '':
             self._print_summary()
 
     def print_extra_warnings(self) -> None:
@@ -2731,7 +2844,27 @@ Try setting b_lundef to false instead.'''.format(self.coredata.options[OptionKey
     # declare_dependency).
     def validate_within_subproject(self, subdir, fname):
         srcdir = Path(self.environment.source_dir)
-        norm = Path(srcdir, subdir, fname).resolve()
+        builddir = Path(self.environment.build_dir)
+        if isinstance(fname, P_OBJ.DependencyVariableString):
+            def validate_installable_file(fpath: Path) -> bool:
+                installablefiles: T.Set[Path] = set()
+                for d in self.build.data:
+                    for s in d.sources:
+                        installablefiles.add(Path(s.absolute_path(srcdir, builddir)))
+                installabledirs = [str(Path(srcdir, s.source_subdir)) for s in self.build.install_dirs]
+                if fpath in installablefiles:
+                    return True
+                for d in installabledirs:
+                    if str(fpath).startswith(d):
+                        return True
+                return False
+
+            norm = Path(fname)
+            # variables built from a dep.get_variable are allowed to refer to
+            # subproject files, as long as they are scheduled to be installed.
+            if validate_installable_file(norm):
+                return
+        norm = Path(os.path.abspath(Path(srcdir, subdir, fname)))
         if os.path.isdir(norm):
             inputtype = 'directory'
         else:
@@ -2756,6 +2889,9 @@ Try setting b_lundef to false instead.'''.format(self.coredata.options[OptionKey
 
     @T.overload
     def source_strings_to_files(self, sources: T.List['mesonlib.FileOrString'], strict: bool = False) -> T.List['mesonlib.FileOrString']: ... # noqa: F811
+
+    @T.overload
+    def source_strings_to_files(self, sources: T.List[mesonlib.FileOrString, build.GeneratedTypes]) -> T.List[T.Union[mesonlib.File, build.GeneratedTypes]]: ... # noqa: F811
 
     @T.overload
     def source_strings_to_files(self, sources: T.List['SourceInputs'], strict: bool = True) -> T.List['SourceOutputs']: ... # noqa: F811
@@ -2792,7 +2928,19 @@ Try setting b_lundef to false instead.'''.format(self.coredata.options[OptionKey
                                            'string or File-type object')
         return results
 
-    def add_target(self, name, tobj):
+    @staticmethod
+    def validate_forbidden_targets(name: str) -> None:
+        if name.startswith('meson-internal__'):
+            raise InvalidArguments("Target names starting with 'meson-internal__' are reserved "
+                                   "for Meson's internal use. Please rename.")
+        if name.startswith('meson-') and '.' not in name:
+            raise InvalidArguments("Target names starting with 'meson-' and without a file extension "
+                                   "are reserved for Meson's internal use. Please rename.")
+        if name in coredata.FORBIDDEN_TARGET_NAMES:
+            raise InvalidArguments(f"Target name '{name}' is reserved for Meson's "
+                                   "internal use. Please rename.")
+
+    def add_target(self, name: str, tobj: build.Target) -> None:
         if name == '':
             raise InterpreterException('Target name must not be empty.')
         if name.strip() == '':
@@ -2805,17 +2953,19 @@ Try setting b_lundef to false instead.'''.format(self.coredata.options[OptionKey
                     To define a target that builds in that directory you must define it
                     in the meson.build file in that directory.
             '''))
-        if name.startswith('meson-'):
-            raise InvalidArguments("Target names starting with 'meson-' are reserved "
-                                   "for Meson's internal use. Please rename.")
-        if name in coredata.FORBIDDEN_TARGET_NAMES:
-            raise InvalidArguments(f"Target name '{name}' is reserved for Meson's "
-                                   "internal use. Please rename.")
+        self.validate_forbidden_targets(name)
         # To permit an executable and a shared library to have the
         # same name, such as "foo.exe" and "libfoo.a".
         idname = tobj.get_id()
         if idname in self.build.targets:
             raise InvalidCode(f'Tried to create target "{name}", but a target of that name already exists.')
+
+        if isinstance(tobj, build.BuildTarget):
+            missing_languages = tobj.process_compilers()
+            self.add_languages(missing_languages, True, tobj.for_machine)
+            tobj.process_compilers_late(missing_languages)
+            self.add_stdlib_info(tobj)
+
         self.build.targets[idname] = tobj
         if idname not in self.coredata.target_guids:
             self.coredata.target_guids[idname] = str(uuid.uuid4()).upper()
@@ -2933,10 +3083,10 @@ Try setting b_lundef to false instead.'''.format(self.coredata.options[OptionKey
                     outputs.update(o)
 
         kwargs['include_directories'] = self.extract_incdirs(kwargs)
-        target = targetclass(name, self.subdir, self.subproject, for_machine, srcs, struct, objs, self.environment, kwargs)
+        target = targetclass(name, self.subdir, self.subproject, for_machine, srcs, struct, objs,
+                             self.environment, self.compilers[for_machine], kwargs)
         target.project_version = self.project_version
 
-        self.add_stdlib_info(target)
         self.add_target(name, target)
         self.project_args_frozen = True
         return target
@@ -2958,17 +3108,8 @@ This will become a hard error in the future.''', location=self.current_node)
                 cleaned_items.append(i)
             kwargs['d_import_dirs'] = cleaned_items
 
-    def get_used_languages(self, target):
-        result = set()
-        for i in target.sources:
-            for lang, c in self.coredata.compilers[target.for_machine].items():
-                if c.can_compile(i):
-                    result.add(lang)
-                    break
-        return result
-
     def add_stdlib_info(self, target):
-        for l in self.get_used_languages(target):
+        for l in target.compilers.keys():
             dep = self.build.stdlibs[target.for_machine].get(l, None)
             if dep:
                 target.add_deps(dep)

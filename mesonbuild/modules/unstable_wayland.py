@@ -18,7 +18,7 @@ from . import ExtensionModule, ModuleReturnValue
 from ..build import CustomTarget
 from ..interpreter.type_checking import NoneType, in_set_validator
 from ..interpreterbase import FeatureNew, typed_pos_args, typed_kwargs, KwargInfo
-from ..mesonlib import File, MesonException, MachineChoice
+from ..mesonlib import File, MesonException
 
 
 class WaylandModule(ExtensionModule):
@@ -45,7 +45,11 @@ class WaylandModule(ExtensionModule):
     )
     def scan_xml(self, state, args, kwargs):
         if self.scanner_bin is None:
-            self.scanner_bin = state.find_program('wayland-scanner', for_machine=MachineChoice.BUILD)
+            # wayland-scanner from BUILD machine must have same version as wayland
+            # libraries from HOST machine.
+            dep = state.dependency('wayland-client')
+            self.scanner_bin = state.find_tool('wayland-scanner', 'wayland-scanner', 'wayland_scanner',
+                                               wanted=dep.version)
 
         scope = 'public' if kwargs['public'] else 'private'
         sides = [i for i in ['client', 'server'] if kwargs[i]]
@@ -61,6 +65,7 @@ class WaylandModule(ExtensionModule):
                 f'{name}-protocol',
                 state.subdir,
                 state.subproject,
+                state.environment,
                 [self.scanner_bin, f'{scope}-code', '@INPUT@', '@OUTPUT@'],
                 [xml_file],
                 [f'{name}-protocol.c'],
@@ -73,6 +78,7 @@ class WaylandModule(ExtensionModule):
                     f'{name}-{side}-protocol',
                     state.subdir,
                     state.subproject,
+                    state.environment,
                     [self.scanner_bin, f'{side}-header', '@INPUT@', '@OUTPUT@'],
                     [xml_file],
                     [f'{name}-{side}-protocol.h'],
@@ -100,7 +106,7 @@ class WaylandModule(ExtensionModule):
             raise MesonException('stable protocols do not require a version number.')
 
         if self.protocols_dep is None:
-            self.protocols_dep = self.interpreter.func_dependency(state.current_node, ['wayland-protocols'], {})
+            self.protocols_dep = state.dependency('wayland-protocols')
 
         if self.pkgdatadir is None:
             self.pkgdatadir = self.protocols_dep.get_variable(pkgconfig='pkgdatadir', internal='pkgdatadir')

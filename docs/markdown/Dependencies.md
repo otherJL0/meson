@@ -45,7 +45,7 @@ non-found dependencies.
 
 Meson also allows to get variables that are defined in the
 `pkg-config` file. This can be done by using the
-`get_pkgconfig_variable` function.
+[[dep.get_pkgconfig_variable]] function.
 
 ```meson
 zdep_prefix = zdep.get_pkgconfig_variable('prefix')
@@ -89,6 +89,28 @@ does not provide an argument for the type of dependency, one of the
 following will happen: If 'default_value' was provided that value will
 be returned, if 'default_value' was not provided then an error will be
 raised.
+
+## Dependencies that provide resource files
+
+Sometimes a dependency provides installable files which other projects then
+need to use. For example, wayland-protocols XML files.
+
+```meson
+foo_dep = dependency('foo')
+foo_datadir = foo_dep.get_variable('pkgdatadir')
+custom_target(
+    'foo-generated.c',
+    input: foo_datadir / 'prototype.xml',
+    output: 'foo-generated.c',
+    command: [generator, '@INPUT@', '@OUTPUT@']
+)
+```
+
+*Since 0.63.0* these actually work as expected, even when they come from a
+(well-formed) internal dependency. This only works when treating the files to
+be obtained as interchangeable with a system dependency -- e.g. only public
+files may be used, and leaving the directory pointed to by the dependency is
+not allowed.
 
 # Declaring your own
 
@@ -166,7 +188,7 @@ no pkg-config on macOS and Windows.
 In these cases Meson provides convenience wrappers in the form of `system`
 dependencies. Internally these dependencies do exactly what a user would do
 in the build system DSL or with a script, likely calling
-`compiler.find_library()`, setting `link_with` and `include_directories`. By
+[[compiler.find_library]], setting `link_with` and `include_directories`. By
 putting these in Meson upstream the barrier of using them is lowered, as
 projects using Meson don't have to re-implement the logic.
 
@@ -322,7 +344,7 @@ boost_dep = dependency('boost', modules : ['thread', 'utility'])
 exe = executable('myprog', 'file.cc', dependencies : boost_dep)
 ```
 
-You can call `dependency` multiple times with different modules and
+You can call [[dependency]] multiple times with different modules and
 use those to link against your targets.
 
 If your boost headers or libraries are in non-standard locations you

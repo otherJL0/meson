@@ -505,18 +505,24 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
         @wraps(f)
         def wrapper(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
 
-            def emit_feature_change(values: T.Dict[str, T.Union[str, T.Tuple[str, str]]], feature: T.Union[T.Type['FeatureDeprecated'], T.Type['FeatureNew']]) -> None:
+            def emit_feature_change(values: T.Dict[_T, T.Union[str, T.Tuple[str, str]]], feature: T.Union[T.Type['FeatureDeprecated'], T.Type['FeatureNew']]) -> None:
                 for n, version in values.items():
-                    if isinstance(value, (dict, list)):
+                    warn = False
+                    if isinstance(version, tuple):
+                        version, msg = version
+                    else:
+                        msg = None
+
+                    if n in {dict, list}:
+                        assert isinstance(n, type), 'for mypy'
+                        if isinstance(value, n):
+                            feature.single_use(f'"{name}" keyword argument "{info.name}" of type {n.__name__}', version, subproject, msg, location=node)
+                    elif isinstance(value, (dict, list)):
                         warn = n in value
                     else:
                         warn = n == value
 
                     if warn:
-                        if isinstance(version, tuple):
-                            version, msg = version
-                        else:
-                            msg = None
                         feature.single_use(f'"{name}" keyword argument "{info.name}" value "{n}"', version, subproject, msg, location=node)
 
             node, _, _kwargs, subproject = get_callee_args(wrapped_args)
@@ -695,8 +701,8 @@ class FeatureNew(FeatureCheckBase):
 
     def log_usage_warning(self, tv: str, location: T.Optional['mparser.BaseNode']) -> None:
         args = [
-            'Project targeting', f"'{tv}'",
-            'but tried to use feature introduced in',
+            'Project targets', f"'{tv}'",
+            'but uses feature introduced in',
             f"'{self.feature_version}':",
             f'{self.feature_name}.',
         ]
@@ -728,8 +734,8 @@ class FeatureDeprecated(FeatureCheckBase):
 
     def log_usage_warning(self, tv: str, location: T.Optional['mparser.BaseNode']) -> None:
         args = [
-            'Project targeting', f"'{tv}'",
-            'but tried to use feature deprecated since',
+            'Project targets', f"'{tv}'",
+            'but uses feature deprecated since',
             f"'{self.feature_version}':",
             f'{self.feature_name}.',
         ]

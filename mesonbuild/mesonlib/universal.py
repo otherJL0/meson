@@ -26,11 +26,11 @@ import platform, subprocess, operator, os, shlex, shutil, re
 import collections
 from functools import lru_cache, wraps, total_ordering
 from itertools import tee, filterfalse
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, NamedTemporaryFile
 import typing as T
-import uuid
 import textwrap
 import copy
+import pickle
 
 from mesonbuild import mlog
 
@@ -123,6 +123,7 @@ __all__ = [
     'listify',
     'partition',
     'path_is_in_root',
+    'pickle_load',
     'Popen_safe',
     'quiet_git',
     'quote_arg',
@@ -710,6 +711,8 @@ def darwin_get_object_archs(objpath: str) -> 'ImmutableListProtocol[str]':
     # Convert from lipo-style archs to meson-style CPUs
     stdo = stdo.replace('i386', 'x86')
     stdo = stdo.replace('arm64', 'aarch64')
+    stdo = stdo.replace('ppc7400', 'ppc')
+    stdo = stdo.replace('ppc970', 'ppc')
     # Add generic name for armv7 and armv7s
     if 'armv7' in stdo:
         stdo += ' arm'
@@ -1762,7 +1765,7 @@ class OrderedSet(T.MutableSet[_T]):
         for item in iterable:
             self.__container[item] = None
 
-    def difference(self, set_: T.Union[T.Set[_T], 'OrderedSet[_T]']) -> 'OrderedSet[_T]':
+    def difference(self, set_: T.Iterable[_T]) -> 'OrderedSet[_T]':
         return type(self)(e for e in self if e not in set_)
 
     def difference_update(self, iterable: T.Iterable[_T]) -> None:
@@ -1884,35 +1887,71 @@ class RealPathAction(argparse.Action):
         setattr(namespace, self.dest, os.path.abspath(os.path.realpath(values)))
 
 
-def get_wine_shortpath(winecmd: T.List[str], wine_paths: T.Sequence[str]) -> str:
-    """Get A short version of @wine_paths to avoid reaching WINEPATH number
-    of char limit.
-    """
+def get_wine_shortpath(winecmd: T.List[str], wine_paths: T.Sequence[str],
+                       workdir: T.Optional[str] = None) -> str:
+    '''
+    WINEPATH size is limited to 1024 bytes which can easily be exceeded when
+    adding the path to every dll inside build directory. See
+    https://bugs.winehq.org/show_bug.cgi?id=45810.
 
+    To shorten it as much as possible we use path relative to `workdir`
+    where possible and convert absolute paths to Windows shortpath (e.g.
+    "/usr/x86_64-w64-mingw32/lib" to "Z:\\usr\\X86_~FWL\\lib").
+
+    This limitation reportedly has been fixed with wine >= 6.4
+    '''
+
+    # Remove duplicates
     wine_paths = list(OrderedSet(wine_paths))
 
-    getShortPathScript = '%s.bat' % str(uuid.uuid4()).lower()[:5]
-    with open(getShortPathScript, mode='w', encoding='utf-8') as f:
-        f.write("@ECHO OFF\nfor %%x in (%*) do (\n echo|set /p=;%~sx\n)\n")
-        f.flush()
-    try:
-        with open(os.devnull, 'w', encoding='utf-8') as stderr:
-            wine_path = subprocess.check_output(
-                winecmd +
-                ['cmd', '/C', getShortPathScript] + wine_paths,
-                stderr=stderr).decode('utf-8')
-    except subprocess.CalledProcessError as e:
-        print("Could not get short paths: %s" % e)
-        wine_path = ';'.join(wine_paths)
-    finally:
-        os.remove(getShortPathScript)
-    if len(wine_path) > 2048:
-        raise MesonException(
-            'WINEPATH size {} > 2048'
-            ' this will cause random failure.'.format(
-                len(wine_path)))
+    # Check if it's already short enough
+    wine_path = ';'.join(wine_paths)
+    if len(wine_path) <= 1024:
+        return wine_path
 
-    return wine_path.strip(';')
+    # Check if we have wine >= 6.4
+    from ..programs import ExternalProgram
+    wine = ExternalProgram('wine', winecmd, silent=True)
+    if version_compare(wine.get_version(), '>=6.4'):
+        return wine_path
+
+    # Check paths that can be reduced by making them relative to workdir.
+    rel_paths = []
+    if workdir:
+        abs_paths = []
+        for p in wine_paths:
+            try:
+                rel = Path(p).relative_to(workdir)
+                rel_paths.append(str(rel))
+            except ValueError:
+                abs_paths.append(p)
+        wine_paths = abs_paths
+
+    if wine_paths:
+        # BAT script that takes a list of paths in argv and prints semi-colon separated shortpaths
+        with NamedTemporaryFile('w', suffix='.bat', encoding='utf-8', delete=False) as bat_file:
+            bat_file.write('''
+            @ECHO OFF
+            for %%x in (%*) do (
+                echo|set /p=;%~sx
+            )
+            ''')
+        try:
+            stdout = subprocess.check_output(winecmd + ['cmd', '/C', bat_file.name] + wine_paths,
+                                             encoding='utf-8', stderr=subprocess.DEVNULL)
+            stdout = stdout.strip(';')
+            if stdout:
+                wine_paths = stdout.split(';')
+            else:
+                mlog.warning('Could not shorten WINEPATH: empty stdout')
+        except subprocess.CalledProcessError as e:
+            mlog.warning(f'Could not shorten WINEPATH: {str(e)}')
+        finally:
+            os.unlink(bat_file.name)
+    wine_path = ';'.join(rel_paths + wine_paths)
+    if len(wine_path) > 1024:
+        mlog.warning('WINEPATH exceeds 1024 characters which could cause issues')
+    return wine_path
 
 
 def run_once(func: T.Callable[..., _T]) -> T.Callable[..., _T]:
@@ -1938,8 +1977,7 @@ def generate_list(func: T.Callable[..., T.Generator[_T, None, None]]) -> T.Calla
     return wrapper
 
 
-class OptionOverrideProxy(collections.abc.MutableMapping):
-
+class OptionOverrideProxy(collections.abc.Mapping):
     '''Mimic an option list but transparently override selected option
     values.
     '''
@@ -1947,26 +1985,29 @@ class OptionOverrideProxy(collections.abc.MutableMapping):
     # TODO: the typing here could be made more explicit using a TypeDict from
     # python 3.8 or typing_extensions
 
-    def __init__(self, overrides: T.Dict['OptionKey', T.Any], *options: 'KeyedOptionDictType'):
-        self.overrides = overrides.copy()
-        self.options: T.Dict['OptionKey', UserOption] = {}
-        for o in options:
-            self.options.update(o)
+    def __init__(self, overrides: T.Dict['OptionKey', T.Any], options: 'KeyedOptionDictType',
+                 subproject: T.Optional[str] = None):
+        self.overrides = overrides
+        self.options = options
+        self.subproject = subproject
 
-    def __getitem__(self, key: 'OptionKey') -> T.Union['UserOption']:
-        if key in self.options:
+    def __getitem__(self, key: 'OptionKey') -> 'UserOption':
+        # FIXME: This is fundamentally the same algorithm than interpreter.get_option_internal().
+        # We should try to share the code somehow.
+        key = key.evolve(subproject=self.subproject)
+        if not key.is_project():
+            opt = self.options.get(key)
+            if opt is None or opt.yielding:
+                opt = self.options[key.as_root()]
+        else:
             opt = self.options[key]
-            if key in self.overrides:
-                opt = copy.copy(opt)
-                opt.set_value(self.overrides[key])
-            return opt
-        raise KeyError('Option not found', key)
-
-    def __setitem__(self, key: 'OptionKey', value: T.Union['UserOption']) -> None:
-        self.overrides[key] = value.value
-
-    def __delitem__(self, key: 'OptionKey') -> None:
-        del self.overrides[key]
+            if opt.yielding:
+                opt = self.options.get(key.as_root(), opt)
+        override_value = self.overrides.get(key.as_root())
+        if override_value is not None:
+            opt = copy.copy(opt)
+            opt.set_value(override_value)
+        return opt
 
     def __iter__(self) -> T.Iterator['OptionKey']:
         return iter(self.options)
@@ -1974,8 +2015,12 @@ class OptionOverrideProxy(collections.abc.MutableMapping):
     def __len__(self) -> int:
         return len(self.options)
 
-    def copy(self) -> 'OptionOverrideProxy':
-        return OptionOverrideProxy(self.overrides.copy(), self.options.copy())
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, OptionOverrideProxy):
+            return NotImplemented
+        t1 = (self.overrides, self.subproject, self.options)
+        t2 = (other.overrides, other.subproject, other.options)
+        return t1 == t2
 
 
 class OptionType(enum.IntEnum):
@@ -2014,6 +2059,7 @@ _BUILTIN_NAMES = {
     'install_umask',
     'layout',
     'optimization',
+    'prefer_static',
     'stdsplit',
     'strip',
     'unity',
@@ -2223,3 +2269,23 @@ class OptionKey:
     def is_base(self) -> bool:
         """Convenience method to check if this is a base option."""
         return self.type is OptionType.BASE
+
+def pickle_load(filename: str, object_name: str, object_type: T.Type) -> T.Any:
+    load_fail_msg = f'{object_name} file {filename!r} is corrupted. Try with a fresh build tree.'
+    try:
+        with open(filename, 'rb') as f:
+            obj = pickle.load(f)
+    except (pickle.UnpicklingError, EOFError):
+        raise MesonException(load_fail_msg)
+    except (TypeError, ModuleNotFoundError, AttributeError):
+        raise MesonException(
+            f"{object_name} file {filename!r} references functions or classes that don't "
+            "exist. This probably means that it was generated with an old "
+            "version of meson.")
+    if not isinstance(obj, object_type):
+        raise MesonException(load_fail_msg)
+    from ..coredata import version as coredata_version
+    from ..coredata import major_versions_differ, MesonVersionMismatchException
+    if major_versions_differ(obj.version, coredata_version):
+        raise MesonVersionMismatchException(obj.version, coredata_version)
+    return obj

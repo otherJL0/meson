@@ -101,9 +101,7 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
 
     # /showIncludes is needed for build dependency tracking in Ninja
     # See: https://ninja-build.org/manual.html#_deps
-    # Assume UTF-8 sources by default, but self.unix_args_to_native() removes it
-    # if `/source-charset` is set too.
-    always_args = ['/nologo', '/showIncludes', '/utf-8']
+    always_args = ['/nologo', '/showIncludes']  # type: T.List[str]
     warn_args = {
         '0': [],
         '1': ['/W2'],
@@ -117,6 +115,10 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
         self.base_options = {mesonlib.OptionKey(o) for o in ['b_pch', 'b_ndebug', 'b_vscrt']} # FIXME add lto, pgo and the like
         self.target = target
         self.is_64 = ('x64' in target) or ('x86_64' in target)
+        # Assume UTF-8 sources by default on Visual Studio 2015 or later, or clang,
+        # but self.unix_args_to_native() removes it if `/source-charset` is set too.
+        if isinstance(self, ClangClCompiler) or mesonlib.version_compare(self.version, '>=19.00'):
+            self.always_args = self.always_args + ['/utf-8']
         # do some canonicalization of target machine
         if 'x86_64' in target:
             self.machine = 'x64'
@@ -383,6 +385,23 @@ class VisualStudioLikeCompiler(Compiler, metaclass=abc.ABCMeta):
     def get_argument_syntax(self) -> str:
         return 'msvc'
 
+    def symbols_have_underscore_prefix(self, env: 'Environment') -> bool:
+        '''
+        Check if the compiler prefixes an underscore to global C symbols.
+
+        This overrides the Clike method, as for MSVC checking the
+        underscore prefix based on the compiler define never works,
+        so do not even try.
+        '''
+        # Try to consult a hardcoded list of cases we know
+        # absolutely have an underscore prefix
+        result = self._symbols_have_underscore_prefix_list(env)
+        if result is not None:
+            return result
+
+        # As a last resort, try search in a compiled binary
+        return self._symbols_have_underscore_prefix_searchbin(env)
+
 
 class MSVCCompiler(VisualStudioLikeCompiler):
 
@@ -428,7 +447,7 @@ class ClangClCompiler(VisualStudioLikeCompiler):
 
     def has_arguments(self, args: T.List[str], env: 'Environment', code: str, mode: str) -> T.Tuple[bool, bool]:
         if mode != 'link':
-            args = args + ['-Werror=unknown-argument']
+            args = args + ['-Werror=unknown-argument', '-Werror=unknown-warning-option']
         return super().has_arguments(args, env, code, mode)
 
     def get_toolset_version(self) -> T.Optional[str]:

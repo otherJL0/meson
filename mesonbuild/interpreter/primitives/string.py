@@ -126,7 +126,7 @@ class StringHolder(ObjectHolder[str]):
     @typed_pos_args('str.substring', optargs=[int, int])
     def substring_method(self, args: T.Tuple[T.Optional[int], T.Optional[int]], kwargs: TYPE_kwargs) -> str:
         start = args[0] if args[0] is not None else 0
-        end   = args[1] if args[1] is not None else len(self.held_object)
+        end = args[1] if args[1] is not None else len(self.held_object)
         return self.held_object[start:end]
 
     @noKwargs
@@ -179,3 +179,18 @@ class MesonVersionStringHolder(StringHolder):
     def version_compare_method(self, args: T.Tuple[str], kwargs: TYPE_kwargs) -> bool:
         self.interpreter.tmp_meson_version = args[0]
         return version_compare(self.held_object, args[0])
+
+# These special subclasses of string exist to cover the case where a dependency
+# exports a string variable interchangeable with a system dependency. This
+# matters because a dependency can only have string-type get_variable() return
+# values. If at any time dependencies start supporting additional variable
+# types, this class could be deprecated.
+class DependencyVariableString(str):
+    pass
+
+class DependencyVariableStringHolder(StringHolder):
+    def op_div(self, other: str) -> T.Union[str, DependencyVariableString]:
+        ret = super().op_div(other)
+        if '..' in other:
+            return ret
+        return DependencyVariableString(ret)

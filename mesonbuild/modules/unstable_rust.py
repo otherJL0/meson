@@ -19,7 +19,7 @@ from . import ExtensionModule, ModuleReturnValue
 from .. import mlog
 from ..build import BothLibraries, BuildTarget, CustomTargetIndex, Executable, ExtractedObjects, GeneratedList, IncludeDirs, CustomTarget, StructuredSources
 from ..dependencies import Dependency, ExternalLibrary
-from ..interpreter.interpreter import TEST_KWARGS
+from ..interpreter.interpreter import TEST_KWARGS, OUTPUT_KW
 from ..interpreterbase import ContainerTypeInfo, InterpreterException, KwargInfo, FeatureNew, typed_kwargs, typed_pos_args, noPosargs
 from ..mesonlib import File
 
@@ -151,7 +151,8 @@ class RustModule(ExtensionModule):
         new_target = Executable(
             name, base_target.subdir, state.subproject, base_target.for_machine,
             base_target.sources, base_target.structured_sources,
-            base_target.objects, base_target.environment, new_target_kwargs
+            base_target.objects, base_target.environment, base_target.compilers,
+            new_target_kwargs
         )
 
         test = self.interpreter.make_test(
@@ -172,7 +173,7 @@ class RustModule(ExtensionModule):
             listify=True,
             required=True,
         ),
-        KwargInfo('output', str, required=True),
+        OUTPUT_KW,
     )
     def bindgen(self, state: 'ModuleState', args: T.List, kwargs: 'FuncBindgen') -> ModuleReturnValue:
         """Wrapper around bindgen to simplify it's use.
@@ -194,7 +195,8 @@ class RustModule(ExtensionModule):
         inc_strs: T.List[str] = []
         for i in kwargs['include_directories']:
             # bindgen always uses clang, so it's safe to hardcode -I here
-            inc_strs.extend([f'-I{x}' for x in i.to_string_list(state.environment.get_source_dir())])
+            inc_strs.extend([f'-I{x}' for x in i.to_string_list(
+                state.environment.get_source_dir(), state.environment.get_build_dir())])
 
         if self._bindgen_bin is None:
             self._bindgen_bin = state.find_program('bindgen')
@@ -211,6 +213,7 @@ class RustModule(ExtensionModule):
             f'rustmod-bindgen-{name}'.replace('/', '_'),
             state.subdir,
             state.subproject,
+            state.environment,
             self._bindgen_bin.get_command() + [
                 '@INPUT@', '--output',
                 os.path.join(state.environment.build_dir, '@OUTPUT@')] +

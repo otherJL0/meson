@@ -111,7 +111,7 @@ class WindowsModule(ExtensionModule):
         'winddows.compile_resoures',
         DEPEND_FILES_KW.evolve(since='0.47.0'),
         DEPENDS_KW.evolve(since='0.47.0'),
-        INCLUDE_DIRECTORIES.evolve(name='include_directories'),
+        INCLUDE_DIRECTORIES,
         KwargInfo('args', ContainerTypeInfo(list, str), default=[], listify=True),
     )
     def compile_resources(self, state: 'ModuleState',
@@ -193,6 +193,7 @@ class WindowsModule(ExtensionModule):
                 name_formatted,
                 state.subdir,
                 state.subproject,
+                state.environment,
                 command,
                 [src],
                 [output],

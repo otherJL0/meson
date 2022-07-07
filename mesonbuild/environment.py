@@ -157,6 +157,8 @@ def get_llvm_tool_names(tool: str) -> T.List[str]:
     # unless it becomes a stable release.
     suffixes = [
         '', # base (no suffix)
+        '-14',  '14',
+        '-13',  '13',
         '-12',  '12',
         '-11',  '11',
         '-10',  '10',
@@ -171,7 +173,7 @@ def get_llvm_tool_names(tool: str) -> T.List[str]:
         '-3.7', '37',
         '-3.6', '36',
         '-3.5', '35',
-        '-13',    # Debian development snapshot
+        '-15',    # Debian development snapshot
         '-devel', # FreeBSD development snapshot
     ]
     names = []
@@ -654,7 +656,7 @@ class Environment:
                         _p_env = re.split(r':|;', p_env)
                     p_list = list(mesonlib.OrderedSet(_p_env))
                 elif keyname == 'pkg_config_path':
-                    p_list = list(mesonlib.OrderedSet(p_env.split(':')))
+                    p_list = list(mesonlib.OrderedSet(p_env.split(os.pathsep)))
                 else:
                     p_list = split_args(p_env)
                 p_list = [e for e in p_list if e]  # filter out any empty elements

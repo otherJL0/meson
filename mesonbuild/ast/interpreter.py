@@ -14,8 +14,12 @@
 
 # This class contains the basic functionality needed to run any interpreter
 # or an interpreter-based tool.
+from __future__ import annotations
 
-from .visitor import AstVisitor
+import os
+import sys
+import typing as T
+
 from .. import mparser, mesonlib
 from .. import environment
 
@@ -26,8 +30,6 @@ from ..interpreterbase import (
     BreakRequest,
     ContinueRequest,
     default_resolve_key,
-    TYPE_nvar,
-    TYPE_nkwargs,
 )
 
 from ..interpreter import (
@@ -39,32 +41,33 @@ from ..interpreter import (
 )
 
 from ..mparser import (
-    AndNode,
     ArgumentNode,
     ArithmeticNode,
     ArrayNode,
     AssignmentNode,
     BaseNode,
-    ComparisonNode,
     ElementaryNode,
     EmptyNode,
-    ForeachClauseNode,
     IdNode,
-    IfClauseNode,
-    IndexNode,
     MethodNode,
     NotNode,
-    OrNode,
     PlusAssignmentNode,
     TernaryNode,
-    UMinusNode,
 )
 
-import os, sys
-import typing as T
-
 if T.TYPE_CHECKING:
+    from .visitor import AstVisitor
     from ..interpreter import Interpreter
+    from ..interpreterbase import TYPE_nkwargs, TYPE_nvar
+    from ..mparser import (
+        AndNode,
+        ComparisonNode,
+        ForeachClauseNode,
+        IfClauseNode,
+        IndexNode,
+        OrNode,
+        UMinusNode,
+    )
 
 class DontCareObject(MesonInterpreterObject):
     pass
@@ -114,6 +117,7 @@ class AstInterpreter(InterpreterBase):
                            'add_global_arguments': self.func_do_nothing,
                            'add_global_link_arguments': self.func_do_nothing,
                            'add_project_arguments': self.func_do_nothing,
+                           'add_project_dependencies': self.func_do_nothing,
                            'add_project_link_arguments': self.func_do_nothing,
                            'message': self.func_do_nothing,
                            'generator': self.func_do_nothing,
@@ -157,6 +161,7 @@ class AstInterpreter(InterpreterBase):
                            'summary': self.func_do_nothing,
                            'range': self.func_do_nothing,
                            'structured_sources': self.func_do_nothing,
+                           'debug': self.func_do_nothing,
                            })
 
     def _unholder_args(self, args: _T, kwargs: _V) -> T.Tuple[_T, _V]:

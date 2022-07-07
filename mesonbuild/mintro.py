@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 """This is a helper script for IDE developers. It allows you to
 extract information such as list of targets, files, compiler flags,
@@ -21,19 +22,21 @@ project files and don't need this info."""
 
 import collections
 import json
-from . import build, coredata as cdata
-from . import mesonlib
-from .ast import IntrospectionInterpreter, build_target_functions, AstConditionLevel, AstIDGenerator, AstIndentationGenerator, AstJSONPrinter
-from . import mlog
-from .backend import backends
-from .mparser import BaseNode, FunctionNode, ArrayNode, ArgumentNode, StringNode
-from .interpreter import Interpreter
+import os
 from pathlib import Path, PurePath
 import typing as T
-import os
-import argparse
 
+from . import build, mesonlib, mlog, coredata as cdata
+from .ast import IntrospectionInterpreter, BUILD_TARGET_FUNCTIONS, AstConditionLevel, AstIDGenerator, AstIndentationGenerator, AstJSONPrinter
+from .backend import backends
 from .mesonlib import OptionKey
+from .mparser import FunctionNode, ArrayNode, ArgumentNode, StringNode
+
+if T.TYPE_CHECKING:
+    import argparse
+
+    from .interpreter import Interpreter
+    from .mparser import BaseNode
 
 def get_meson_info_file(info_dir: str) -> str:
     return os.path.join(info_dir, 'meson-info.json')
@@ -166,7 +169,7 @@ def list_targets_from_source(intr: IntrospectionInterpreter) -> T.List[T.Dict[st
             args = []  # type: T.List[BaseNode]
             if isinstance(n, FunctionNode):
                 args = list(n.args.arguments)
-                if n.func_name in build_target_functions:
+                if n.func_name in BUILD_TARGET_FUNCTIONS:
                     args.pop(0)
             elif isinstance(n, ArrayNode):
                 args = n.args.arguments
@@ -266,9 +269,9 @@ def list_buildoptions(coredata: cdata.CoreData, subprojects: T.Optional[T.List[s
     test_option_names = {OptionKey('errorlogs'),
                          OptionKey('stdsplit')}
 
-    dir_options: 'cdata.KeyedOptionDictType' = {}
-    test_options: 'cdata.KeyedOptionDictType' = {}
-    core_options: 'cdata.KeyedOptionDictType' = {}
+    dir_options: 'cdata.MutableKeyedOptionDictType' = {}
+    test_options: 'cdata.MutableKeyedOptionDictType' = {}
+    core_options: 'cdata.MutableKeyedOptionDictType' = {}
     for k, v in coredata.options.items():
         if k in dir_option_names:
             dir_options[k] = v
